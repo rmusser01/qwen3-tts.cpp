@@ -80,4 +80,7 @@ void release_preferred_backend(ggml_backend_t backend);
 // Helper function to free model resources
 void free_ggml_resources(struct ggml_context * ctx, ggml_backend_buffer_t buffer);
 
+// Returns true if the given backend is a GPU (GPU, IGPU, or ACCEL type)
+bool backend_is_gpu(ggml_backend_t backend);
+
 } // namespace qwen3_tts

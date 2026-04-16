@@ -376,4 +376,14 @@ void free_ggml_resources(struct ggml_context * ctx, ggml_backend_buffer_t buffer
     }
 }
 
+bool backend_is_gpu(ggml_backend_t backend) {
+    if (!backend) return false;
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    if (!dev) return false;
+    enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+    return type == GGML_BACKEND_DEVICE_TYPE_GPU ||
+           type == GGML_BACKEND_DEVICE_TYPE_IGPU ||
+           type == GGML_BACKEND_DEVICE_TYPE_ACCEL;
+}
+
 } // namespace qwen3_tts
