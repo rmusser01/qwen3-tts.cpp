@@ -27,6 +27,7 @@ third_party/
 # IDE
 .vscode/
 .idea/
+.zed/
 *.swp
 *.swo
 
