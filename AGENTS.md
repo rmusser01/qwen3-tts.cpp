@@ -10,14 +10,22 @@ Coding conventions and architecture guide for AI agents working on this codebase
 
 ```
 qwen3-tts.cpp/
-  src/                          # C++ source files
+  src/
+    common/                     # Shared infrastructure (compiled once)
+      gguf_loader.{h,cpp}      # GGUF model loading + backend management
+      coreml_code_predictor.{h,mm}  # Optional CoreML bridge (macOS)
+    tokenizer/                  # Text processing
+      text_tokenizer.{h,cpp}   # BPE text tokenizer
+    transformer/                # Code generation
+      tts_transformer.{h,cpp}  # TTS transformer (talker + code predictor)
+    encoder/                    # Speaker encoding
+      audio_tokenizer_encoder.{h,cpp}  # ECAPA-TDNN speaker encoder
+    decoder/                    # Audio synthesis
+      audio_tokenizer_decoder.{h,cpp}  # WavTokenizer vocoder
+    pipeline/                   # Orchestration + API
+      qwen3_tts.{h,cpp}        # Full pipeline orchestration
+      qwen3tts_c_api.{h,cpp}   # C API wrapper for FFI
     main.cpp                    # CLI entry point
-    qwen3_tts.{h,cpp}          # Full pipeline orchestration
-    tts_transformer.{h,cpp}    # TTS transformer (talker + code predictor)
-    text_tokenizer.{h,cpp}     # BPE text tokenizer
-    audio_tokenizer_encoder.{h,cpp}  # ECAPA-TDNN speaker encoder
-    audio_tokenizer_decoder.{h,cpp}  # WavTokenizer vocoder
-    gguf_loader.{h,cpp}        # GGUF model loading
   tests/                        # Component tests
     test_codebook.cpp
     test_vq_only.cpp
@@ -35,6 +43,8 @@ qwen3-tts.cpp/
   models/                       # GGUF models (gitignored)
   CMakeLists.txt
 ```
+
+Includes use module-qualified paths: `#include "common/gguf_loader.h"`, `#include "pipeline/qwen3_tts.h"`, etc.
 
 ## Build System
 
