@@ -43,6 +43,9 @@ struct tts_params {
 
     // RNG seed for reproducible output (-1 = random)
     int32_t seed = -1;
+
+    // Force f32 accumulation in matmul (default: true for quality)
+    bool f32_acc = true;
 };
 
 // TTS generation result

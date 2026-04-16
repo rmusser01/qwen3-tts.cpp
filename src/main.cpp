@@ -18,6 +18,7 @@ void print_usage(const char * program) {
     fprintf(stderr, "  --max-tokens <n>       Maximum audio tokens (default: 4096)\n");
     fprintf(stderr, "  --repetition-penalty <val> Repetition penalty (default: 1.05)\n");
     fprintf(stderr, "  --seed <n>             RNG seed for reproducible output (default: random)\n");
+    fprintf(stderr, "  --no-f32-acc           Disable f32 matmul accumulation (faster, less precise)\n");
     fprintf(stderr, "  -l, --language <lang>  Language: en,ru,zh,ja,ko,de,fr,es (default: en)\n");
     fprintf(stderr, "  -j, --threads <n>      Number of threads (default: 4)\n");
     fprintf(stderr, "  -h, --help             Show this help\n");
@@ -109,6 +110,8 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             params.seed = std::stoi(argv[i]);
+        } else if (arg == "--no-f32-acc") {
+            params.f32_acc = false;
         } else if (arg == "-l" || arg == "--language") {
             if (++i >= argc) {
                 fprintf(stderr, "Error: missing language value\n");

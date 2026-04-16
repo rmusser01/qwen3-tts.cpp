@@ -414,6 +414,7 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
         }
     }
     transformer_.clear_kv_cache();
+    transformer_.set_f32_acc(params.f32_acc);
     if (params.seed >= 0) {
         transformer_.set_seed((uint32_t)params.seed);
     }

@@ -272,6 +272,9 @@ public:
 
     // Set RNG seed for reproducible output
     void set_seed(uint32_t seed) { rng_.seed(seed); }
+
+    // Force f32 accumulation in matmul (improves quality on some GPUs, default: on)
+    void set_f32_acc(bool v) { f32_acc_ = v; }
     
     // Legacy interface for compatibility
     bool forward(const int32_t * tokens, int32_t n_tokens, int32_t n_past,
@@ -337,6 +340,7 @@ private:
     std::vector<float> last_hidden_;
     std::vector<ggml_fp16_t> embd_row_fp16_scratch_;
     std::mt19937 rng_{std::random_device{}()};
+    bool f32_acc_ = true;
     CoreMLCodePredictor coreml_code_predictor_;
     bool use_coreml_code_predictor_ = false;
     std::string coreml_code_predictor_path_;
