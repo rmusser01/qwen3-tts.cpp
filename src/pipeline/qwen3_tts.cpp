@@ -385,9 +385,14 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
     };
     sample_memory("synth/start");
     
-    // Step 2: Tokenize input text
+    // Step 2: Tokenize input text (with optional voice steering instruction)
     int64_t t_tokenize_start = get_time_ms();
-    std::vector<int32_t> text_tokens = tokenizer_.encode_for_tts(text);
+    std::vector<int32_t> text_tokens;
+    if (!params.instruction.empty()) {
+        text_tokens = tokenizer_.encode_for_tts_with_instruction(text, params.instruction);
+    } else {
+        text_tokens = tokenizer_.encode_for_tts(text);
+    }
     result.t_tokenize_ms = get_time_ms() - t_tokenize_start;
     sample_memory("synth/after-tokenize");
     

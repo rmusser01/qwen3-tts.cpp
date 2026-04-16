@@ -31,6 +31,10 @@ public:
     
     // Encode with TTS format: <|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n
     std::vector<int32_t> encode_for_tts(const std::string & text) const;
+
+    // Encode with instruction: <|im_start|>user\n{instruction}<|im_end|>\n<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n
+    std::vector<int32_t> encode_for_tts_with_instruction(const std::string & text,
+                                                          const std::string & instruction) const;
     
     // Decode token IDs to text
     std::string decode(const std::vector<int32_t> & tokens) const;
@@ -66,8 +70,9 @@ private:
     // BPE merges: pair -> rank (lower rank = higher priority)
     std::map<std::pair<std::string, std::string>, int32_t> bpe_ranks_;
     
-    // Special token for "assistant" and newline
+    // Special token IDs for chat format
     int32_t assistant_token_id_ = 77091;
+    int32_t user_token_id_ = 882;
     int32_t newline_token_id_ = 198;  // '\n' encoded
     
     // Helper: convert bytes to unicode (GPT-2 style byte encoding)

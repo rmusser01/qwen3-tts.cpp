@@ -46,6 +46,9 @@ struct tts_params {
 
     // Force f32 accumulation in matmul (default: true for quality)
     bool f32_acc = true;
+
+    // Voice steering instruction (e.g. "Speak happily", "Use a deep voice")
+    std::string instruction;
 };
 
 // TTS generation result
