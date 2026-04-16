@@ -59,6 +59,8 @@ void AudioTokenizerDecoder::unload_model() {
 
     state_.compute_meta.clear();
     codes_buf_.clear();
+    cached_graph_ = nullptr;
+    cached_n_frames_ = -1;
 }
 
 void AudioTokenizerDecoder::normalize_codebooks() {
@@ -584,7 +586,7 @@ struct ggml_tensor * AudioTokenizerDecoder::apply_residual_block(struct ggml_con
     
     int64_t out_channels = block.conv1_w->ne[2];
     int padding = 6 * block.dilation;
-    x = ggml_pad_ext(ctx, x, padding, 0, 0, 0, 0, 0, 0, 0);
+    x = ggml_pad_reflect_1d(ctx, x, padding, 0);
     x = ggml_conv_1d(ctx, block.conv1_w, x, 1, 0, block.dilation);
     if (block.conv1_b) {
         x = ggml_add(ctx, x, ggml_reshape_3d(ctx, block.conv1_b, 1, out_channels, 1));
@@ -872,8 +874,15 @@ bool AudioTokenizerDecoder::decode_single(const int32_t * codes, int32_t n_frame
         }
     }
     
-    struct ggml_cgraph * gf = build_graph(n_frames);
-    
+    struct ggml_cgraph * gf;
+    if (cached_graph_ && cached_n_frames_ == n_frames) {
+        gf = cached_graph_;
+    } else {
+        gf = build_graph(n_frames);
+        cached_graph_ = gf;
+        cached_n_frames_ = n_frames;
+    }
+
     if (!ggml_backend_sched_alloc_graph(state_.sched, gf)) {
         error_msg_ = "Failed to allocate graph";
         return false;
