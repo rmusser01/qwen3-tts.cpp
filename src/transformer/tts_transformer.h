@@ -77,9 +77,14 @@ struct tts_transformer_config {
     int32_t codec_vocab_size = 3072;  // talker.codec_embd/codec_head
     int32_t n_codebooks = 16;
     
-    // Code predictor
+    // Code predictor (may differ from talker in 1.7B model; -1 = same as talker)
     int32_t code_pred_layers = 5;
     int32_t code_pred_vocab_size = 2048;  // Per-codebook vocab
+    int32_t code_pred_hidden_size = -1;
+    int32_t code_pred_n_attention_heads = -1;
+    int32_t code_pred_n_key_value_heads = -1;
+    int32_t code_pred_intermediate_size = -1;
+    int32_t code_pred_head_dim = -1;
     
     // Special codec tokens
     int32_t codec_pad_id = 2148;
@@ -139,15 +144,19 @@ struct tts_transformer_model {
     // Codec head (for first codebook prediction)
     struct ggml_tensor * codec_head = nullptr;     // [hidden_size, codec_vocab_size]
     
-     // Code predictor layers
-     std::vector<transformer_layer> code_pred_layers;
-     
-     // Code predictor output norm (final RMS norm before lm_head)
-     struct ggml_tensor * code_pred_output_norm = nullptr;  // [hidden_size]
-     
-     // Code predictor per-codebook embeddings and heads (15 codebooks, 0 uses talker output)
-     std::vector<struct ggml_tensor *> code_pred_embd;  // [hidden_size, code_pred_vocab_size] x 15
-     std::vector<struct ggml_tensor *> code_pred_head;  // [hidden_size, code_pred_vocab_size] x 15
+    // Code predictor layers
+    std::vector<transformer_layer> code_pred_layers;
+
+    // Code predictor output norm (final RMS norm before lm_head)
+    struct ggml_tensor * code_pred_output_norm = nullptr;  // [code_pred_hidden_size]
+
+    // Code predictor MTP projection (talker_hidden -> code_pred_hidden, 1.7B only)
+    struct ggml_tensor * code_pred_mtp_proj_w = nullptr;  // [hidden_size, code_pred_hidden_size]
+    struct ggml_tensor * code_pred_mtp_proj_b = nullptr;  // [code_pred_hidden_size]
+
+    // Code predictor per-codebook embeddings and heads (15 codebooks, 0 uses talker output)
+    std::vector<struct ggml_tensor *> code_pred_embd;  // [code_pred_hidden_size, code_pred_vocab_size] x 15
+    std::vector<struct ggml_tensor *> code_pred_head;  // [code_pred_hidden_size, code_pred_vocab_size] x 15
     
     // GGML context for tensor metadata
     struct ggml_context * ctx = nullptr;

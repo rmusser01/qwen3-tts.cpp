@@ -55,6 +55,9 @@ class Qwen3TTSConverter:
         "talker.text_projection.linear_fc2.bias": "talker.text_proj.fc2.bias",
         # Code Predictor - Output norm
         "talker.code_predictor.model.norm.weight": "code_pred.output_norm.weight",
+        # Code Predictor - MTP projection (talker_hidden -> code_pred_hidden, 1.7B only)
+        "talker.code_predictor.small_to_mtp_projection.weight": "code_pred.mtp_proj.weight",
+        "talker.code_predictor.small_to_mtp_projection.bias": "code_pred.mtp_proj.bias",
         # Speaker Encoder - Initial conv
         "speaker_encoder.blocks.0.conv.weight": "spk_enc.conv0.weight",
         "speaker_encoder.blocks.0.conv.bias": "spk_enc.conv0.bias",
@@ -177,6 +180,11 @@ class Qwen3TTSConverter:
         # Code Predictor parameters
         self.code_predictor_num_layers = code_predictor_config.get("num_hidden_layers", 5)
         self.code_predictor_vocab_size = code_predictor_config.get("vocab_size", 2048)
+        self.code_pred_hidden_size = code_predictor_config.get("hidden_size", self.hidden_size)
+        self.code_pred_n_attention_heads = code_predictor_config.get("num_attention_heads", self.num_attention_heads)
+        self.code_pred_n_key_value_heads = code_predictor_config.get("num_key_value_heads", self.num_key_value_heads)
+        self.code_pred_intermediate_size = code_predictor_config.get("intermediate_size", self.intermediate_size)
+        self.code_pred_head_dim = code_predictor_config.get("head_dim", self.head_dim)
 
         # Speaker Encoder parameters
         self.speaker_enc_dim = speaker_encoder_config.get("enc_dim", 1024)
@@ -460,6 +468,13 @@ class Qwen3TTSConverter:
         # Code Predictor parameters
         writer.add_uint32(f"{arch}.code_predictor.layer_count", self.code_predictor_num_layers)
         writer.add_uint32(f"{arch}.code_predictor.vocab_size", self.code_predictor_vocab_size)
+        # Write code predictor config only when it differs from talker (1.7B model)
+        if self.code_pred_hidden_size != self.hidden_size:
+            writer.add_uint32(f"{arch}.code_pred.embedding_length", self.code_pred_hidden_size)
+            writer.add_uint32(f"{arch}.code_pred.attention.head_count", self.code_pred_n_attention_heads)
+            writer.add_uint32(f"{arch}.code_pred.attention.head_count_kv", self.code_pred_n_key_value_heads)
+            writer.add_uint32(f"{arch}.code_pred.feed_forward_length", self.code_pred_intermediate_size)
+            writer.add_uint32(f"{arch}.code_pred.attention.key_length", self.code_pred_head_dim)
 
         # Speaker Encoder parameters
         writer.add_uint32(f"{arch}.speaker_encoder.embedding_length", self.speaker_enc_dim)
