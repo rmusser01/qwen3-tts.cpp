@@ -75,7 +75,11 @@ if(APPLE AND QWEN3_TTS_COREML)
 endif()
 
 # Text tokenizer library
-add_library(text_tokenizer STATIC src/tokenizer/text_tokenizer.cpp)
+add_library(text_tokenizer STATIC
+    src/tokenizer/text_tokenizer.cpp
+    src/tokenizer/tokenizer_unicode.cpp
+    src/tokenizer/tokenizer_unicode_data.cpp
+)
 target_link_libraries(text_tokenizer PUBLIC qwen3_tts_common)
 
 # TTS Transformer library

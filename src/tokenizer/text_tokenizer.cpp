@@ -1,4 +1,5 @@
 #include "tokenizer/text_tokenizer.h"
+#include "tokenizer/tokenizer_unicode.h"
 
 #include <algorithm>
 #include <cstring>
@@ -6,6 +7,11 @@
 #include <sstream>
 
 namespace qwen3_tts {
+
+// GPT-2 pre-tokenization regex patterns for Unicode-aware word splitting
+static const std::vector<std::string> GPT2_REGEX_EXPRS = {
+    "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)",
+};
 
 // GPT-2 byte-to-unicode mapping
 // Maps bytes 0-255 to unicode characters to avoid control characters
@@ -237,39 +243,17 @@ std::vector<int32_t> TextTokenizer::encode(const std::string & text) const {
     }
     
     std::vector<int32_t> tokens;
-    
-    // Convert text to GPT-2 unicode representation
-    std::string unicode_text = bytes_to_unicode(text);
-    
-    // Simple word splitting (no regex pre-tokenization for now)
-    // Split on spaces but keep the space with the following word (GPT-2 style)
-    std::vector<std::string> words;
-    std::string current_word;
-    
-    size_t i = 0;
-    while (i < unicode_text.size()) {
-        size_t len = utf8_len(unicode_text[i]);
-        std::string ch = unicode_text.substr(i, len);
-        
-        // Check if this is a space (Ġ in GPT-2 encoding)
-        if (ch == "Ġ") {
-            if (!current_word.empty()) {
-                words.push_back(current_word);
-                current_word.clear();
-            }
-            current_word = ch;  // Start new word with space
-        } else {
-            current_word += ch;
-        }
-        i += len;
-    }
-    if (!current_word.empty()) {
-        words.push_back(current_word);
+
+    // Unicode-aware GPT-2 regex pre-tokenization
+    std::vector<std::string> words = unicode_regex_split(text, GPT2_REGEX_EXPRS);
+    if (words.empty() && !text.empty()) {
+        words.push_back(bytes_to_unicode(text));
     }
     
-    // BPE encode each word
+    // BPE encode each word (convert to GPT-2 unicode first)
     for (const auto & word : words) {
-        auto bpe_tokens = bpe(word);
+        std::string unicode_word = bytes_to_unicode(word);
+        auto bpe_tokens = bpe(unicode_word);
         for (const auto & tok : bpe_tokens) {
             auto it = vocab_.find(tok);
             if (it != vocab_.end()) {
