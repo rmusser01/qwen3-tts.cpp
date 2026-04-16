@@ -20,14 +20,18 @@ Runs the full TTS pipeline in pure C++17, including text tokenization, speaker e
 
 ## Prerequisites
 
-- C++17 compiler (GCC 9+ or Clang 10+)
-- CMake 3.14+
-- [GGML](https://github.com/ggml-org/ggml) built from source
-- Python 3.10+ with [uv](https://github.com/astral-sh/uv) (model conversion only)
+- **Compiler:** GCC 9+ or Clang 10+ (Linux/macOS), or MSVC 2019+ (Windows)
+- **CMake:** 3.14+
+- **GGML:** Built from source (vendored as git submodule)
+- **GPU backends (optional):**
+  - Metal — macOS only, built into Xcode Command Line Tools
+  - [Vulkan SDK](https://vulkan.lunarg.com/) — Linux and Windows (AMD, NVIDIA, Intel)
+  - [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) — NVIDIA GPUs
+- **Python 3.10+** with [uv](https://github.com/astral-sh/uv) — model conversion only; not needed if using [pre-built GGUF files](#pre-built-models-skip-python)
 
-## Quickstart (macOS, copy/paste)
+## Quickstart (macOS)
 
-Run these commands from a fresh clone:
+Run these commands from a fresh clone. For **Linux** or **Windows**, see the [Build](#build) section below.
 
 ```bash
 git clone https://github.com/predict-woo/qwen3-tts.cpp.git
@@ -99,22 +103,77 @@ If your Markdown renderer does not show inline controls, use direct links:
 
 ## Build
 
+### Clone and initialize
+
 ```bash
 git clone https://github.com/predict-woo/qwen3-tts.cpp.git
 cd qwen3-tts.cpp
 git submodule update --init --recursive
-
-# Build GGML (vendored in ./ggml)
-cmake -S ggml -B ggml/build -DGGML_METAL=ON
-cmake --build ggml/build -j4
-
-# Build qwen3-tts.cpp
-cmake -S . -B build
-cmake --build build -j4
 ```
 
-> **Note:** The top-level CMake currently expects GGML in `./ggml` with libraries under `./ggml/build/src`.
-> For NVIDIA CUDA, build GGML with `-DGGML_CUDA=ON` and run with `QWEN3_TTS_BACKEND=cuda`.
+> **Note:** The top-level CMake expects GGML in `./ggml` with libraries under `./ggml/build/src`.
+
+### macOS (Metal)
+
+```bash
+# Build GGML with Metal GPU acceleration
+cmake -S ggml -B ggml/build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build ggml/build -j$(sysctl -n hw.ncpu)
+
+# Build qwen3-tts.cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(sysctl -n hw.ncpu)
+```
+
+CoreML acceleration for the code predictor stage is enabled by default when the model exists. Generate it with `python scripts/setup_pipeline_models.py --coreml on`.
+
+### Linux (Vulkan)
+
+Install the [Vulkan SDK](https://vulkan.lunarg.com/) first, then:
+
+```bash
+# Build GGML with Vulkan
+cmake -S ggml -B ggml/build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build ggml/build -j$(nproc)
+
+# Build qwen3-tts.cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+```
+
+### Linux (CUDA)
+
+Requires the [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit), then:
+
+```bash
+# Build GGML with CUDA
+cmake -S ggml -B ggml/build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build ggml/build -j$(nproc)
+
+# Build qwen3-tts.cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+```
+
+At runtime, set `QWEN3_TTS_BACKEND=cuda` to force the CUDA backend (see [Backend Selection](#backend-selection)).
+
+### Windows (MSVC)
+
+Open a **Developer Command Prompt for VS 2022** (or 2019), then:
+
+```cmd
+:: Build GGML (CPU-only; add -DGGML_VULKAN=ON or -DGGML_CUDA=ON for GPU)
+cmake -S ggml -B ggml\build -DCMAKE_BUILD_TYPE=Release
+cmake --build ggml\build --config Release
+
+:: Build qwen3-tts.cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+```
+
+**DLL placement:** Copy `ggml.dll`, `ggml-base.dll`, `ggml-cpu.dll`, and the backend DLL (e.g. `ggml-vulkan.dll` or `ggml-cuda.dll`) into the same directory as `qwen3-tts-cli.exe`.
+
+For Vulkan on Windows, install the [Vulkan SDK](https://vulkan.lunarg.com/) and add `-DGGML_VULKAN=ON` to the GGML cmake line. For CUDA, add `-DGGML_CUDA=ON`.
 
 ## Model Setup (Recommended)
 
@@ -130,6 +189,20 @@ Useful flags:
 - `--force` re-downloads and re-generates all artifacts.
 - `--coreml auto|on|off` controls CoreML export behavior.
 - `--skip-download` skips HF download and uses existing local model dirs.
+
+### Pre-built Models (Skip Python)
+
+Community-hosted GGUF files are available on HuggingFace. Download directly — no Python required:
+
+```bash
+mkdir -p models
+curl -L -o models/qwen3-tts-0.6b-f16.gguf \
+  "https://huggingface.co/koboldcpp/tts/resolve/main/qwen3-tts-0.6b-f16.gguf"
+curl -L -o models/qwen3-tts-tokenizer-f16.gguf \
+  "https://huggingface.co/koboldcpp/tts/resolve/main/qwen3-tts-tokenizer-f16.gguf"
+```
+
+These are F16 (full-precision) models. Q8\_0 quantized variants are also available and will be auto-detected if named `qwen3-tts-0.6b-q8_0.gguf`.
 
 ## Manual Model Conversion (Advanced)
 
@@ -298,6 +371,38 @@ Example output (92 frames, 7.3s audio):
 ```
 
 The code predictor (15 sequential forward passes per frame) accounts for ~71% of generation time.
+
+## Troubleshooting
+
+### Linux: shared library link error (`recompile with -fPIC`)
+
+If you see `relocation R_X86_64_32S ... recompile with -fPIC` when building the shared library, your CMakeLists.txt is missing `set(CMAKE_POSITION_INDEPENDENT_CODE ON)`. This is fixed in current builds.
+
+### Vulkan: segfault when loading vocoder
+
+Older versions had a bug where `normalize_codebooks()` wrote directly to GPU-mapped memory, causing a segfault on Vulkan backends. This is fixed in current builds. If you hit this on a fork, see [issue #20](https://github.com/predict-woo/qwen3-tts.cpp/issues/20) for the fix.
+
+### Windows: missing DLL errors at runtime
+
+Copy all required DLLs next to `qwen3-tts-cli.exe`:
+- `ggml.dll`, `ggml-base.dll`, `ggml-cpu.dll`
+- Backend DLL: `ggml-vulkan.dll` or `ggml-cuda.dll` (if using GPU)
+
+These are built under `ggml\build\bin\Release\` (or `ggml\build\src\` depending on generator).
+
+### CUDA: slower than expected
+
+Ensure you are using the CUDA backend at runtime:
+
+```bash
+QWEN3_TTS_BACKEND=cuda QWEN3_TTS_DEVICE=0 ./build/qwen3-tts-cli -m models -t "test" -o out.wav
+```
+
+Tune chunked vocoder decode with `QWEN3_TTS_DECODER_GPU_MAX_FRAMES` (default 34) and `QWEN3_TTS_DECODER_GPU_CONTEXT_FRAMES` (default 12) if you see OOM or slow decode on your GPU.
+
+### Vocoder runs on CPU despite GPU backend shown
+
+If logs show `AudioTokenizerDecoder backend: Vulkan0` but vocoder decode is still slow (~17s), this is the backend/buffer mismatch bug. Fixed in current builds — update to the latest version.
 
 ## Acknowledgments
 
