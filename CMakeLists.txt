@@ -123,6 +123,14 @@ target_link_libraries(qwen3-tts-cli PRIVATE
     qwen3_tts
 )
 
+# Quantization tool
+add_executable(qwen3-tts-quantize
+    src/qwen3_tts_quantize.cpp
+)
+target_link_libraries(qwen3-tts-quantize PRIVATE
+    qwen3_tts_common
+)
+
 # Test executable for tokenizer
 add_executable(test_tokenizer
     tests/test_tokenizer.cpp
