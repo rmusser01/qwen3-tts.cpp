@@ -659,7 +659,11 @@ bool TTSTransformer::load_tensor_data(const std::string & path, struct gguf_cont
         
         read_buf.resize(nbytes);
         
+#ifdef _WIN32
+        if (_fseeki64(f, (int64_t)(data_offset + offset), SEEK_SET) != 0) {
+#else
         if (fseek(f, data_offset + offset, SEEK_SET) != 0) {
+#endif
             error_msg_ = "Failed to seek to tensor data: " + std::string(name);
             fclose(f);
             release_preferred_backend(backend);
