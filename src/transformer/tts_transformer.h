@@ -267,8 +267,11 @@ public:
                   int32_t top_k = 50);
     
     const tts_transformer_config & get_config() const { return model_.config; }
-    
+
     const std::string & get_error() const { return error_msg_; }
+
+    // Set RNG seed for reproducible output
+    void set_seed(uint32_t seed) { rng_.seed(seed); }
     
     // Legacy interface for compatibility
     bool forward(const int32_t * tokens, int32_t n_tokens, int32_t n_past,
