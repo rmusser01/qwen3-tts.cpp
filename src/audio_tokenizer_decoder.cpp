@@ -3,13 +3,37 @@
 #include "ggml-cpu.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <limits>
 #include <numeric>
 
 #define QWEN3_TTS_DEC_MAX_NODES 32768
 
 namespace qwen3_tts {
+
+static int32_t get_env_i32(const char * key, int32_t default_value) {
+    const char * v = std::getenv(key);
+    if (!v || !*v) {
+        return default_value;
+    }
+
+    char * end = nullptr;
+    long parsed = strtol(v, &end, 10);
+    if (end == v || *end != '\0') {
+        return default_value;
+    }
+
+    if (parsed < 0) {
+        return default_value;
+    }
+    if (parsed > std::numeric_limits<int32_t>::max()) {
+        return std::numeric_limits<int32_t>::max();
+    }
+
+    return (int32_t) parsed;
+}
 
 AudioTokenizerDecoder::AudioTokenizerDecoder() = default;
 
@@ -367,7 +391,7 @@ bool AudioTokenizerDecoder::load_model(const std::string & model_path) {
         error_msg_ = "Failed to create backend scheduler";
         return false;
     }
-    
+
     state_.compute_meta.resize(ggml_tensor_overhead() * QWEN3_TTS_DEC_MAX_NODES + ggml_graph_overhead());
     
     return true;
@@ -802,8 +826,38 @@ struct ggml_cgraph * AudioTokenizerDecoder::build_graph(int32_t n_frames) {
     return gf;
 }
 
-bool AudioTokenizerDecoder::decode(const int32_t * codes, int32_t n_frames,
-                                    std::vector<float> & samples) {
+int64_t AudioTokenizerDecoder::output_samples_for_frames(int32_t n_frames) const {
+    if (n_frames <= 0) {
+        return 0;
+    }
+
+    int64_t n = n_frames;
+
+    auto conv_t_out = [](int64_t in_len, int64_t stride, int64_t kernel) -> int64_t {
+        // ConvTranspose1D output length with padding=0, dilation=1, output_padding=0.
+        return (in_len - 1) * stride + kernel;
+    };
+
+    // Two ConvNeXt-style upsample blocks (stride=2, no crop).
+    const int64_t up0_k = model_.upsample[0].conv_w ? model_.upsample[0].conv_w->ne[0] : 4;
+    const int64_t up1_k = model_.upsample[1].conv_w ? model_.upsample[1].conv_w->ne[0] : 4;
+    n = conv_t_out(n, 2, up0_k);
+    n = conv_t_out(n, 2, up1_k);
+
+    // Decoder blocks: ConvTranspose1D followed by symmetric crop of (k - s) on both sides.
+    for (int i = 0; i < 4; ++i) {
+        const int64_t s = model_.config.upsample_rates[i];
+        const int64_t k = model_.dec_blocks[i].conv_t_w ? model_.dec_blocks[i].conv_t_w->ne[0] : 2 * s;
+        const int64_t out_full = conv_t_out(n, s, k);
+        const int64_t crop = k - s;
+        n = out_full - crop - crop;
+    }
+
+    return n > 0 ? n : 0;
+}
+
+bool AudioTokenizerDecoder::decode_single(const int32_t * codes, int32_t n_frames, int32_t position_offset,
+                                          std::vector<float> & samples) {
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -849,7 +903,7 @@ bool AudioTokenizerDecoder::decode(const int32_t * codes, int32_t n_frames,
     if (positions_tensor) {
         std::vector<int32_t> positions(n_frames);
         for (int i = 0; i < n_frames; ++i) {
-            positions[i] = i;
+            positions[i] = position_offset + i;
         }
         ggml_backend_tensor_set(positions_tensor, positions.data(), 0, 
                                 n_frames * sizeof(int32_t));
@@ -877,6 +931,76 @@ bool AudioTokenizerDecoder::decode(const int32_t * codes, int32_t n_frames,
     ggml_backend_sched_reset(state_.sched);
     
     return true;
+}
+
+bool AudioTokenizerDecoder::is_primary_backend_cuda() const {
+    ggml_backend_dev_t device = state_.backend ? ggml_backend_get_device(state_.backend) : nullptr;
+    if (!device) {
+        return false;
+    }
+
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(device);
+    const char * reg_name = reg ? ggml_backend_reg_name(reg) : nullptr;
+    return reg_name && strcmp(reg_name, "CUDA") == 0;
+}
+
+bool AudioTokenizerDecoder::decode_chunked_cuda(const int32_t * codes, int32_t n_frames,
+                                                std::vector<float> & samples,
+                                                int32_t max_gpu_frames, int32_t context_frames_cfg) {
+    // Chunked CUDA decode to avoid large IM2COL launches for long utterances.
+    const int32_t context_frames = std::min(context_frames_cfg, std::max(0, max_gpu_frames - 1));
+    const int32_t chunk_payload = std::max(1, max_gpu_frames - context_frames);
+
+    fprintf(stderr,
+            "  AudioTokenizerDecoder: chunked GPU decode enabled (frames=%d, chunk=%d, context=%d)\n",
+            n_frames, max_gpu_frames, context_frames);
+
+    const auto & cfg = model_.config;
+    samples.clear();
+    samples.reserve((size_t) output_samples_for_frames(n_frames));
+
+    for (int32_t start = 0; start < n_frames; start += chunk_payload) {
+        const int32_t ctx_start = std::max(0, start - context_frames);
+        const int32_t end = std::min(n_frames, start + chunk_payload);
+        const int32_t seg_frames = end - ctx_start;
+        const int32_t warmup_frames = start - ctx_start;
+
+        std::vector<float> seg_samples;
+        if (!decode_single(codes + (size_t) ctx_start * cfg.n_codebooks, seg_frames, ctx_start, seg_samples)) {
+            return false;
+        }
+
+        const int64_t drop = output_samples_for_frames(warmup_frames);
+        const size_t keep_from = (size_t) std::min<int64_t>(drop, (int64_t) seg_samples.size());
+        samples.insert(samples.end(),
+                       seg_samples.begin() + (std::vector<float>::difference_type) keep_from,
+                       seg_samples.end());
+    }
+
+    return true;
+}
+
+bool AudioTokenizerDecoder::decode(const int32_t * codes, int32_t n_frames,
+                                    std::vector<float> & samples) {
+    if (!model_.ctx) {
+        error_msg_ = "Model not loaded";
+        return false;
+    }
+
+    if (n_frames <= 0) {
+        samples.clear();
+        return true;
+    }
+
+    const int32_t max_gpu_frames = get_env_i32("QWEN3_TTS_DECODER_GPU_MAX_FRAMES", 34);
+    const int32_t context_frames_cfg = get_env_i32("QWEN3_TTS_DECODER_GPU_CONTEXT_FRAMES", 12);
+
+    // Fast path: non-CUDA backends, or requests that fit one decode chunk.
+    if (!is_primary_backend_cuda() || max_gpu_frames <= 0 || n_frames <= max_gpu_frames) {
+        return decode_single(codes, n_frames, 0, samples);
+    }
+
+    return decode_chunked_cuda(codes, n_frames, samples, max_gpu_frames, context_frames_cfg);
 }
 
 void free_audio_decoder_model(audio_decoder_model & model) {

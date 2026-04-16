@@ -114,6 +114,7 @@ cmake --build build -j4
 ```
 
 > **Note:** The top-level CMake currently expects GGML in `./ggml` with libraries under `./ggml/build/src`.
+> For NVIDIA CUDA, build GGML with `-DGGML_CUDA=ON` and run with `QWEN3_TTS_BACKEND=cuda`.
 
 ## Model Setup (Recommended)
 
@@ -193,6 +194,10 @@ At runtime, each component logs its selected backend (for example, `TTSTransform
 - Preferred order: `IGPU` -> `GPU` -> `ACCEL` -> `CPU`
 - Encoder and transformer can run on Metal/other accelerators with CPU fallback in the scheduler
 - Decoder now follows the same backend preference and will use Metal when available
+- `QWEN3_TTS_BACKEND` overrides runtime selection: `auto` (default), `cuda`, or `cpu`
+- `QWEN3_TTS_DEVICE` selects CUDA device index when `QWEN3_TTS_BACKEND=cuda` (default device is index 0)
+- `QWEN3_TTS_DECODER_GPU_MAX_FRAMES` controls max frames per CUDA vocoder chunk (default: `34`)
+- `QWEN3_TTS_DECODER_GPU_CONTEXT_FRAMES` controls left-context frames per CUDA vocoder chunk (default: `12`)
 
 ## Architecture
 
