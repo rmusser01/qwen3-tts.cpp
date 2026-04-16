@@ -43,128 +43,60 @@ else()
     set(GGML_HAS_METAL OFF)
 endif()
 
-# Text tokenizer library
-add_library(text_tokenizer STATIC
-    src/text_tokenizer.cpp
-    src/gguf_loader.cpp
-)
-target_include_directories(text_tokenizer PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${GGML_DIR}/include
-)
-target_link_directories(text_tokenizer PUBLIC
-    ${GGML_BUILD_DIR}/src
-    ${GGML_BUILD_DIR}/src/ggml-metal
-)
-target_link_libraries(text_tokenizer PUBLIC
-    ggml
-    ggml-base
-    ggml-cpu
-    Threads::Threads
-)
-if(GGML_HAS_METAL)
-    target_link_libraries(text_tokenizer PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
-endif()
-
-# TTS Transformer library (GGML-based + optional CoreML bridge)
-set(TTS_TRANSFORMER_SOURCES
-    src/gguf_loader.cpp
-    src/tts_transformer.cpp
-)
+# Common library (gguf_loader + coreml bridge — compiled once, shared by all)
+set(COMMON_SOURCES src/gguf_loader.cpp)
 if(APPLE AND QWEN3_TTS_COREML)
-    list(APPEND TTS_TRANSFORMER_SOURCES src/coreml_code_predictor.mm)
+    list(APPEND COMMON_SOURCES src/coreml_code_predictor.mm)
     set_source_files_properties(src/coreml_code_predictor.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 else()
-    list(APPEND TTS_TRANSFORMER_SOURCES src/coreml_code_predictor_stub.cpp)
+    list(APPEND COMMON_SOURCES src/coreml_code_predictor_stub.cpp)
 endif()
 
-add_library(tts_transformer STATIC
-    ${TTS_TRANSFORMER_SOURCES}
-)
-target_include_directories(tts_transformer PUBLIC
+add_library(qwen3_tts_common STATIC ${COMMON_SOURCES})
+target_include_directories(qwen3_tts_common PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${GGML_DIR}/include
 )
-target_link_directories(tts_transformer PUBLIC
+target_link_directories(qwen3_tts_common PUBLIC
     ${GGML_BUILD_DIR}/src
     ${GGML_BUILD_DIR}/src/ggml-metal
 )
-target_link_libraries(tts_transformer PUBLIC
+target_link_libraries(qwen3_tts_common PUBLIC
     ggml
     ggml-base
     ggml-cpu
     Threads::Threads
 )
 if(GGML_HAS_METAL)
-    target_link_libraries(tts_transformer PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
+    target_link_libraries(qwen3_tts_common PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
 endif()
 if(APPLE AND QWEN3_TTS_COREML)
-    target_link_libraries(tts_transformer PUBLIC
-        "-framework Foundation"
-        "-framework CoreML"
-    )
+    target_link_libraries(qwen3_tts_common PUBLIC "-framework Foundation" "-framework CoreML")
 endif()
 
-# Audio tokenizer encoder library (GGML-based)
-add_library(audio_tokenizer_encoder STATIC
-    src/audio_tokenizer_encoder.cpp
-    src/gguf_loader.cpp
-)
-target_include_directories(audio_tokenizer_encoder PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${GGML_DIR}/include
-)
-target_link_directories(audio_tokenizer_encoder PUBLIC
-    ${GGML_BUILD_DIR}/src
-    ${GGML_BUILD_DIR}/src/ggml-metal
-)
-target_link_libraries(audio_tokenizer_encoder PUBLIC
-    ggml
-    ggml-base
-    ggml-cpu
-    Threads::Threads
-)
-if(GGML_HAS_METAL)
-    target_link_libraries(audio_tokenizer_encoder PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
-endif()
+# Text tokenizer library
+add_library(text_tokenizer STATIC src/text_tokenizer.cpp)
+target_link_libraries(text_tokenizer PUBLIC qwen3_tts_common)
 
-# Audio tokenizer decoder library (GGML-based)
-add_library(audio_tokenizer_decoder STATIC
-    src/audio_tokenizer_decoder.cpp
-    src/gguf_loader.cpp
-)
-target_include_directories(audio_tokenizer_decoder PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${GGML_DIR}/include
-)
-target_link_directories(audio_tokenizer_decoder PUBLIC
-    ${GGML_BUILD_DIR}/src
-    ${GGML_BUILD_DIR}/src/ggml-metal
-)
-target_link_libraries(audio_tokenizer_decoder PUBLIC
-    ggml
-    ggml-base
-    ggml-cpu
-    Threads::Threads
-)
-if(GGML_HAS_METAL)
-    target_link_libraries(audio_tokenizer_decoder PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
-endif()
+# TTS Transformer library
+add_library(tts_transformer STATIC src/tts_transformer.cpp)
+target_link_libraries(tts_transformer PUBLIC qwen3_tts_common)
+
+# Audio tokenizer encoder library
+add_library(audio_tokenizer_encoder STATIC src/audio_tokenizer_encoder.cpp)
+target_link_libraries(audio_tokenizer_encoder PUBLIC qwen3_tts_common)
+
+# Audio tokenizer decoder library
+add_library(audio_tokenizer_decoder STATIC src/audio_tokenizer_decoder.cpp)
+target_link_libraries(audio_tokenizer_decoder PUBLIC qwen3_tts_common)
 
 # Qwen3 TTS library (full pipeline)
-add_library(qwen3_tts STATIC
-    src/qwen3_tts.cpp
-)
-target_include_directories(qwen3_tts PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${GGML_DIR}/include
-)
+add_library(qwen3_tts STATIC src/qwen3_tts.cpp)
 target_link_libraries(qwen3_tts PUBLIC
     text_tokenizer
     tts_transformer
     audio_tokenizer_encoder
     audio_tokenizer_decoder
-    Threads::Threads
 )
 
 # Shared library with C API (for Nim FFI)
