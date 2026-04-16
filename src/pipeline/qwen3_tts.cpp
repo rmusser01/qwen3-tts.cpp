@@ -116,7 +116,9 @@ Qwen3TTS::Qwen3TTS() = default;
 
 Qwen3TTS::~Qwen3TTS() = default;
 
-bool Qwen3TTS::load_models(const std::string & model_dir) {
+bool Qwen3TTS::load_models(const std::string & model_dir,
+                           const std::string & tts_model,
+                           const std::string & tokenizer_model) {
     int64_t t_start = get_time_ms();
     log_memory_usage("load/start");
 
@@ -124,21 +126,27 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     audio_decoder_.unload_model();
     transformer_loaded_ = false;
     decoder_loaded_ = false;
-    
-    // Construct model paths — prefer quantized (q8_0) over full-precision (f16)
-    std::string tts_model_path;
-    std::string q8_path = model_dir + "/qwen3-tts-0.6b-q8_0.gguf";
-    std::string f16_path = model_dir + "/qwen3-tts-0.6b-f16.gguf";
-    FILE * q8_check = fopen(q8_path.c_str(), "r");
-    if (q8_check) {
-        fclose(q8_check);
-        tts_model_path = q8_path;
+
+    // Construct model paths — explicit paths override auto-detection
+    if (!tts_model.empty()) {
+        tts_model_path_ = model_dir + "/" + tts_model;
     } else {
-        tts_model_path = f16_path;
+        // Prefer quantized (q8_0) over full-precision (f16)
+        std::string q8_path = model_dir + "/qwen3-tts-0.6b-q8_0.gguf";
+        std::string f16_path = model_dir + "/qwen3-tts-0.6b-f16.gguf";
+        FILE * q8_check = fopen(q8_path.c_str(), "r");
+        if (q8_check) {
+            fclose(q8_check);
+            tts_model_path_ = q8_path;
+        } else {
+            tts_model_path_ = f16_path;
+        }
     }
-    std::string tokenizer_model_path = model_dir + "/qwen3-tts-tokenizer-f16.gguf";
-    tts_model_path_ = tts_model_path;
-    decoder_model_path_ = tokenizer_model_path;
+    if (!tokenizer_model.empty()) {
+        decoder_model_path_ = model_dir + "/" + tokenizer_model;
+    } else {
+        decoder_model_path_ = model_dir + "/qwen3-tts-tokenizer-f16.gguf";
+    }
     encoder_loaded_ = false;
     transformer_loaded_ = false;
     decoder_loaded_ = false;
@@ -150,13 +158,13 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     }
     
     // Load TTS model (contains text tokenizer + transformer for generation)
-    fprintf(stderr, "Loading TTS model from %s...\n", tts_model_path.c_str());
-    
+    fprintf(stderr, "Loading TTS model from %s...\n", tts_model_path_.c_str());
+
     // Load text tokenizer from TTS model
     int64_t t_tokenizer_start = get_time_ms();
     {
         GGUFLoader loader;
-        if (!loader.open(tts_model_path)) {
+        if (!loader.open(tts_model_path_)) {
             error_msg_ = "Failed to open TTS model: " + loader.get_error();
             return false;
         }
@@ -176,7 +184,7 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     
     // Load TTS transformer from TTS model
     int64_t t_transformer_start = get_time_ms();
-    if (!transformer_.load_model(tts_model_path)) {
+    if (!transformer_.load_model(tts_model_path_)) {
         error_msg_ = "Failed to load TTS transformer: " + transformer_.get_error();
         return false;
     }
@@ -188,9 +196,9 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     
     if (!low_mem_mode_) {
         // Load vocoder (audio decoder) from tokenizer model
-        fprintf(stderr, "Loading vocoder from %s...\n", tokenizer_model_path.c_str());
+        fprintf(stderr, "Loading vocoder from %s...\n", decoder_model_path_.c_str());
         int64_t t_decoder_start = get_time_ms();
-        if (!audio_decoder_.load_model(tokenizer_model_path)) {
+        if (!audio_decoder_.load_model(decoder_model_path_)) {
             error_msg_ = "Failed to load vocoder: " + audio_decoder_.get_error();
             return false;
         }
