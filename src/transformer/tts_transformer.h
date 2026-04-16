@@ -3,7 +3,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "gguf.h"
-#include "coreml_code_predictor.h"
+#include "common/coreml_code_predictor.h"
 
 #include <string>
 #include <map>

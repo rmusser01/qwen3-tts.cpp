@@ -4,7 +4,7 @@
  * Synthesis calls use @autoreleasepool on macOS to drain Metal
  * Objective-C objects when called from background threads. */
 
-#include "qwen3_tts.h"
+#include "pipeline/qwen3_tts.h"
 
 #ifdef __APPLE__
 #include <objc/objc.h>

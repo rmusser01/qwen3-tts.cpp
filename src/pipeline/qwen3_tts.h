@@ -1,9 +1,9 @@
 #pragma once
 
-#include "text_tokenizer.h"
-#include "tts_transformer.h"
-#include "audio_tokenizer_encoder.h"
-#include "audio_tokenizer_decoder.h"
+#include "tokenizer/text_tokenizer.h"
+#include "transformer/tts_transformer.h"
+#include "encoder/audio_tokenizer_encoder.h"
+#include "decoder/audio_tokenizer_decoder.h"
 
 #include <string>
 #include <vector>

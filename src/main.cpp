@@ -1,4 +1,4 @@
-#include "qwen3_tts.h"
+#include "pipeline/qwen3_tts.h"
 
 #include <cstdio>
 #include <cstring>

@@ -1,5 +1,5 @@
-#include "tts_transformer.h"
-#include "gguf_loader.h"
+#include "transformer/tts_transformer.h"
+#include "common/gguf_loader.h"
 
 #include <cmath>
 #include <cstring>

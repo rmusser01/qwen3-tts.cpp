@@ -1,5 +1,5 @@
-#include "text_tokenizer.h"
-#include "gguf_loader.h"
+#include "tokenizer/text_tokenizer.h"
+#include "common/gguf_loader.h"
 
 #include <cstdio>
 #include <cstdlib>

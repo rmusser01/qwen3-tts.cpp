@@ -2,7 +2,7 @@
 #error This file must be compiled with ARC (-fobjc-arc)
 #endif
 
-#include "coreml_code_predictor.h"
+#include "common/coreml_code_predictor.h"
 
 #include <cstdio>
 #include <cstring>

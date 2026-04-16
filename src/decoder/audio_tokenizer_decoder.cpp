@@ -1,5 +1,5 @@
-#include "audio_tokenizer_decoder.h"
-#include "gguf_loader.h"
+#include "decoder/audio_tokenizer_decoder.h"
+#include "common/gguf_loader.h"
 #include "ggml-cpu.h"
 
 #include <cmath>

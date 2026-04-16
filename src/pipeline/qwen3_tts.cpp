@@ -1,5 +1,5 @@
-#include "qwen3_tts.h"
-#include "gguf_loader.h"
+#include "pipeline/qwen3_tts.h"
+#include "common/gguf_loader.h"
 
 #include <cstdio>
 #include <cstring>

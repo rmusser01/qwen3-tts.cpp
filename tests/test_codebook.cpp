@@ -1,4 +1,4 @@
-#include "gguf_loader.h"
+#include "common/gguf_loader.h"
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"

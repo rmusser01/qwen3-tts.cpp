@@ -1,4 +1,4 @@
-#include "text_tokenizer.h"
+#include "tokenizer/text_tokenizer.h"
 
 #include <algorithm>
 #include <cstring>

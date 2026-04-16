@@ -44,12 +44,12 @@ else()
 endif()
 
 # Common library (gguf_loader + coreml bridge — compiled once, shared by all)
-set(COMMON_SOURCES src/gguf_loader.cpp)
+set(COMMON_SOURCES src/common/gguf_loader.cpp)
 if(APPLE AND QWEN3_TTS_COREML)
-    list(APPEND COMMON_SOURCES src/coreml_code_predictor.mm)
-    set_source_files_properties(src/coreml_code_predictor.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    list(APPEND COMMON_SOURCES src/common/coreml_code_predictor.mm)
+    set_source_files_properties(src/common/coreml_code_predictor.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 else()
-    list(APPEND COMMON_SOURCES src/coreml_code_predictor_stub.cpp)
+    list(APPEND COMMON_SOURCES src/common/coreml_code_predictor_stub.cpp)
 endif()
 
 add_library(qwen3_tts_common STATIC ${COMMON_SOURCES})
@@ -75,23 +75,23 @@ if(APPLE AND QWEN3_TTS_COREML)
 endif()
 
 # Text tokenizer library
-add_library(text_tokenizer STATIC src/text_tokenizer.cpp)
+add_library(text_tokenizer STATIC src/tokenizer/text_tokenizer.cpp)
 target_link_libraries(text_tokenizer PUBLIC qwen3_tts_common)
 
 # TTS Transformer library
-add_library(tts_transformer STATIC src/tts_transformer.cpp)
+add_library(tts_transformer STATIC src/transformer/tts_transformer.cpp)
 target_link_libraries(tts_transformer PUBLIC qwen3_tts_common)
 
 # Audio tokenizer encoder library
-add_library(audio_tokenizer_encoder STATIC src/audio_tokenizer_encoder.cpp)
+add_library(audio_tokenizer_encoder STATIC src/encoder/audio_tokenizer_encoder.cpp)
 target_link_libraries(audio_tokenizer_encoder PUBLIC qwen3_tts_common)
 
 # Audio tokenizer decoder library
-add_library(audio_tokenizer_decoder STATIC src/audio_tokenizer_decoder.cpp)
+add_library(audio_tokenizer_decoder STATIC src/decoder/audio_tokenizer_decoder.cpp)
 target_link_libraries(audio_tokenizer_decoder PUBLIC qwen3_tts_common)
 
 # Qwen3 TTS library (full pipeline)
-add_library(qwen3_tts STATIC src/qwen3_tts.cpp)
+add_library(qwen3_tts STATIC src/pipeline/qwen3_tts.cpp)
 target_link_libraries(qwen3_tts PUBLIC
     text_tokenizer
     tts_transformer
@@ -101,7 +101,7 @@ target_link_libraries(qwen3_tts PUBLIC
 
 # Shared library with C API (for Nim FFI)
 add_library(qwen3tts_shared SHARED
-    src/qwen3tts_c_api.cpp
+    src/pipeline/qwen3tts_c_api.cpp
 )
 set_target_properties(qwen3tts_shared PROPERTIES
     OUTPUT_NAME "qwen3tts"
@@ -166,14 +166,14 @@ install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_tok
     RUNTIME DESTINATION bin
 )
 install(FILES
-    src/gguf_loader.h
-    src/text_tokenizer.h
-    src/tts_transformer.h
-    src/coreml_code_predictor.h
-    src/audio_tokenizer_encoder.h
-    src/audio_tokenizer_decoder.h
-    src/qwen3_tts.h
-    src/qwen3tts_c_api.h
+    src/common/gguf_loader.h
+    src/common/coreml_code_predictor.h
+    src/tokenizer/text_tokenizer.h
+    src/transformer/tts_transformer.h
+    src/encoder/audio_tokenizer_encoder.h
+    src/decoder/audio_tokenizer_decoder.h
+    src/pipeline/qwen3_tts.h
+    src/pipeline/qwen3tts_c_api.h
     DESTINATION include
 )
 

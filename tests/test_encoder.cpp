@@ -1,4 +1,4 @@
-#include "audio_tokenizer_encoder.h"
+#include "encoder/audio_tokenizer_encoder.h"
 
 #include <cstdio>
 #include <cstdlib>
