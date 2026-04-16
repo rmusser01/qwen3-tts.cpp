@@ -44,7 +44,7 @@ else()
 endif()
 
 # Common library (gguf_loader + coreml bridge — compiled once, shared by all)
-set(COMMON_SOURCES src/common/gguf_loader.cpp)
+set(COMMON_SOURCES src/common/gguf_loader.cpp src/common/speaker_embedding_io.cpp)
 if(APPLE AND QWEN3_TTS_COREML)
     list(APPEND COMMON_SOURCES src/common/coreml_code_predictor.mm)
     set_source_files_properties(src/common/coreml_code_predictor.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
