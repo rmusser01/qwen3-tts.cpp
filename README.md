@@ -11,12 +11,17 @@ Runs the full TTS pipeline in pure C++17, including text tokenization, speaker e
 ## Features
 
 - Full text-to-speech pipeline in C++17 with GGML backend
+- **0.6B and 1.7B model support** (Base, CustomVoice, VoiceDesign)
 - Voice cloning from reference audio (ECAPA-TDNN x-vector extraction)
-- Greedy and sampled decoding (temperature, top-k, repetition penalty)
-- GGUF model format (F16 and Q8_0 quantization)
-- Runtime backend selection with GPU/Metal preference and CPU fallback
+- **Speaker embedding save/load** for fast repeated cloning (skip encoder)
+- **Voice steering instructions** for controlling speech style and emotion
+- **Unicode/multilingual tokenizer** (Chinese, Japanese, Korean, German, etc.)
+- Greedy and sampled decoding (temperature, top-k, repetition penalty, seed)
+- GGUF model format with **built-in C++ quantizer** (F16, Q8_0, Q4_K, etc.)
+- Runtime backend selection: Metal (macOS), Vulkan (Linux/Windows), CUDA (NVIDIA)
+- Cross-platform: macOS, Linux, Windows (MSVC)
+- C API for FFI integration (Python, Rust, Nim, etc.)
 - Deterministic reference tests comparing C++ output against Python
-- Compile-time timing instrumentation with zero overhead in normal builds
 
 ## Prerequisites
 
@@ -245,20 +250,59 @@ Place both `.gguf` files in a `models/` directory.
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-m, --model <dir>` | Model directory containing GGUF files | (required) |
+| `--tts-model <file>` | TTS model filename (overrides auto-detection) | (auto) |
+| `--tokenizer-model <file>` | Tokenizer/vocoder filename | (auto) |
 | `-t, --text <text>` | Text to synthesize | (required) |
 | `-o, --output <file>` | Output WAV file path | `output.wav` |
 | `-r, --reference <file>` | Reference audio for voice cloning | (none) |
+| `--speaker-embedding <file>` | Use precomputed speaker embedding (.json/.bin) | (none) |
+| `--dump-speaker-embedding <file>` | Save extracted embedding from `--reference` | (none) |
+| `--instruction <text>` | Voice steering instruction (e.g. "Speak happily") | (none) |
 | `--temperature <val>` | Sampling temperature (0 = greedy) | 0.9 |
 | `--top-k <n>` | Top-k sampling (0 = disabled) | 50 |
-| `--top-p <val>` | Top-p sampling | 1.0 |
 | `--max-tokens <n>` | Maximum audio frames to generate | 4096 |
 | `--repetition-penalty <val>` | Repetition penalty on codebook-0 token generation | 1.05 |
+| `--seed <n>` | RNG seed for reproducible output | (random) |
+| `--no-f32-acc` | Disable f32 matmul accumulation (faster, less precise) | (off) |
+| `-l, --language <lang>` | Language: en, ru, zh, ja, ko, de, fr, es | en |
 | `-j, --threads <n>` | Number of compute threads | 4 |
-
-`--top-p` is currently parsed by the CLI but not yet wired into transformer sampling.
 
 On macOS, CoreML code predictor is enabled by default when `models/coreml/code_predictor.mlpackage` exists.
 Set `QWEN3_TTS_USE_COREML=0` to disable it. Low-memory mode is opt-in via `QWEN3_TTS_LOW_MEM=1`.
+
+### Speaker Embedding Workflow
+
+Precompute a speaker embedding once (saves ~20s per synthesis):
+
+```bash
+# Extract and save embedding from reference audio
+./build/qwen3-tts-cli -m models -r reference.wav --dump-speaker-embedding speaker.json \
+  -t "Initial extraction." -o /dev/null
+
+# Reuse embedding for fast voice-cloned synthesis (no encoder needed)
+./build/qwen3-tts-cli -m models --speaker-embedding speaker.json \
+  -t "Fast voice cloning with cached embedding." -o output.wav
+```
+
+### Voice Steering Instructions
+
+Control voice characteristics with the `--instruction` flag (works best with 1.7B VoiceDesign models):
+
+```bash
+./build/qwen3-tts-cli -m models --instruction "Speak in a cheerful tone" \
+  -t "Good morning, everyone!" -o cheerful.wav
+```
+
+### Quantization
+
+Quantize models from F16 to smaller formats without Python:
+
+```bash
+./build/qwen3-tts-quantize --input models/qwen3-tts-0.6b-f16.gguf \
+  --output models/qwen3-tts-0.6b-q8_0.gguf --type q8_0
+```
+
+Supported types: `q8_0`, `q4_0`, `q4_1`, `q5_0`, `q5_1`, `q4_k`, `q5_k`, `q6_k`. The CLI auto-detects Q8_0 models when present.
 
 ### Backend Selection
 
@@ -286,15 +330,15 @@ speech codes ──► [Vocoder] ──► audio waveform (24kHz)
 
 ### Source Files
 
-| File | Component | Description |
-|------|-----------|-------------|
-| `text_tokenizer.{h,cpp}` | Tokenizer | BPE text tokenizer from GGUF |
-| `audio_tokenizer_encoder.{h,cpp}` | Speaker Encoder | ECAPA-TDNN x-vector extractor |
-| `tts_transformer.{h,cpp}` | TTS Transformer | 28-layer Qwen2 talker + 5-layer code predictor |
-| `audio_tokenizer_decoder.{h,cpp}` | Vocoder | WavTokenizer decoder (codes to waveform) |
-| `qwen3_tts.{h,cpp}` | Pipeline | Full pipeline orchestration |
-| `main.cpp` | CLI | Command-line interface |
-| `gguf_loader.{h,cpp}` | GGUF | Model loading utilities |
+| Module | Files | Description |
+|--------|-------|-------------|
+| `src/common/` | `gguf_loader`, `coreml_code_predictor`, `speaker_embedding_io` | Shared infrastructure |
+| `src/tokenizer/` | `text_tokenizer`, `tokenizer_unicode` | BPE tokenizer with Unicode/GPT-2 regex |
+| `src/transformer/` | `tts_transformer` | Qwen2 talker + code predictor (0.6B and 1.7B) |
+| `src/encoder/` | `audio_tokenizer_encoder` | ECAPA-TDNN x-vector speaker encoder |
+| `src/decoder/` | `audio_tokenizer_decoder` | WavTokenizer vocoder (codes to 24kHz audio) |
+| `src/pipeline/` | `qwen3_tts`, `qwen3tts_c_api` | Pipeline orchestration + C API |
+| `src/` | `main.cpp`, `qwen3_tts_quantize.cpp` | CLI entry point + quantization tool |
 
 ### TTS Transformer Details
 
