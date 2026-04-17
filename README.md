@@ -453,3 +453,10 @@ If logs show `AudioTokenizerDecoder backend: Vulkan0` but vocoder decode is stil
 - [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) by Alibaba Qwen team
 - [GGML](https://github.com/ggml-org/ggml) tensor library by Georgi Gerganov
 - [WavTokenizer](https://github.com/jishengpeng/WavTokenizer) vocoder architecture
+- [predict-woo/qwen3-tts.cpp](https://github.com/predict-woo/qwen3-tts.cpp) — original upstream project
+- [gonwan/qwen3-tts.cpp](https://github.com/gonwan/qwen3-tts.cpp) — 1.7B model support, speaker embedding save/load, explicit model selection, seed parameter, Windows `_fseeki64` fix, `--no-f32-acc` flag
+- [Danmoreng/qwen3-tts.cpp](https://github.com/Danmoreng/qwen3-tts.cpp) — Unicode/UTF-8 GPT-2 regex tokenizer (derived from [llama.cpp](https://github.com/ggml-org/llama.cpp)), voice steering instructions, C++ quantizer tool, decoder graph caching, `ggml_pad_reflect_1d` optimization
+- [SiaoZeng](https://github.com/SiaoZeng) — Vulkan vocoder backend-safe `normalize_codebooks` fix ([issue #20](https://github.com/predict-woo/qwen3-tts.cpp/issues/20))
+- [kevinzhow/clawd20130](https://github.com/kevinzhow) — CUDA runtime backend override and chunked GPU vocoder decode ([PR #11](https://github.com/predict-woo/qwen3-tts.cpp/pull/11))
+- [DeryabinIvan](https://github.com/DeryabinIvan) — Windows build fixes ([PR #2](https://github.com/predict-woo/qwen3-tts.cpp/pull/2))
+- [TheTastefulToastie](https://github.com/TheTastefulToastie) — cleaner CMake approach for MSVC `_USE_MATH_DEFINES` / `NOMINMAX`
