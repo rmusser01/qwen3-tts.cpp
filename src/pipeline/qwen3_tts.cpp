@@ -351,6 +351,14 @@ tts_result Qwen3TTS::synthesize_with_embedding(const std::string & text,
         return result;
     }
 
+    int32_t expected_size = transformer_.get_config().hidden_size;
+    if (embedding_size != expected_size) {
+        result.error_msg = "Speaker embedding size mismatch: expected " +
+                           std::to_string(expected_size) + " but got " +
+                           std::to_string(embedding_size);
+        return result;
+    }
+
     return synthesize_internal(text, embedding, params, result);
 }
 

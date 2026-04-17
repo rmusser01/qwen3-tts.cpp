@@ -182,7 +182,7 @@ class Qwen3TTSConverter:
         self.code_predictor_vocab_size = code_predictor_config.get("vocab_size", 2048)
         self.code_pred_hidden_size = code_predictor_config.get("hidden_size", self.hidden_size)
         self.code_pred_n_attention_heads = code_predictor_config.get("num_attention_heads", self.num_attention_heads)
-        self.code_pred_n_key_value_heads = code_predictor_config.get("num_key_value_heads", self.num_key_value_heads)
+        self.code_pred_n_key_value_heads = code_predictor_config.get("num_key_value_heads", self.num_kv_heads)
         self.code_pred_intermediate_size = code_predictor_config.get("intermediate_size", self.intermediate_size)
         self.code_pred_head_dim = code_predictor_config.get("head_dim", self.head_dim)
 

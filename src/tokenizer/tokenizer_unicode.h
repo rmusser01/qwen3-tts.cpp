@@ -39,9 +39,9 @@ struct unicode_cpt_flags {
 
     // decode from uint16
     inline unicode_cpt_flags(const uint16_t flags = 0) {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#if defined(_MSC_VER) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
         *reinterpret_cast<uint16_t*>(this) = flags;
-#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
         is_undefined   = (flags & UNDEFINED)   ? 1 : 0;
         is_number      = (flags & NUMBER)      ? 1 : 0;
         is_letter      = (flags & LETTER)      ? 1 : 0;
@@ -60,9 +60,9 @@ struct unicode_cpt_flags {
     }
 
     inline uint16_t as_uint() const {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#if defined(_MSC_VER) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
         return *reinterpret_cast<const uint16_t*>(this);
-#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
         uint16_t result =
               is_undefined   * UNDEFINED
             + is_number      * NUMBER
