@@ -4,11 +4,14 @@ Serves POST /v1/audio/speech following the OpenAI TTS API spec.
 Uses the qwen3-tts C shared library via ctypes.
 """
 
+import array
+import asyncio
 import io
 import json
 import os
 import struct
 import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -32,6 +35,7 @@ N_THREADS = int(os.environ.get("QWEN3TTS_THREADS", "4"))
 
 tts_engine: QwenTTS | None = None
 voice_embeddings: dict[str, list[float]] = {}
+_synthesis_lock = threading.Lock()  # C API is not thread-safe
 
 
 def load_voices():
@@ -97,7 +101,10 @@ def pcm_float32_to_wav(samples: list[float], sample_rate: int) -> bytes:
     # data chunk
     buf.write(b"data")
     buf.write(struct.pack("<I", data_size))
-    buf.write(struct.pack(f"<{n_samples}f", *samples))
+    arr = array.array('f', samples)
+    if sys.byteorder != 'little':
+        arr.byteswap()
+    buf.write(arr.tobytes())
     return buf.getvalue()
 
 
@@ -111,15 +118,6 @@ class SpeechRequest(BaseModel):
     voice: str = "default"
     response_format: str = "wav"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
-
-
-class ErrorDetail(BaseModel):
-    message: str
-    type: str = "server_error"
-
-
-class ErrorResponse(BaseModel):
-    error: ErrorDetail
 
 
 # ---------------------------------------------------------------------------
@@ -137,20 +135,28 @@ async def create_speech(request: SpeechRequest):
     # Map speed to temperature: speed=1.0 → temp=0.9, speed=2.0 → temp=0.45
     temperature = min(2.0, max(0.1, 0.9 / request.speed))
 
-    try:
-        voice = request.voice.lower()
+    voice = request.voice.lower()
 
-        if voice == "default" or voice not in voice_embeddings:
-            # Basic synthesis (no voice cloning)
-            samples, sample_rate = tts_engine.synthesize(
-                request.input, temperature=temperature,
-            )
-        else:
-            # Voice-cloned synthesis using cached embedding
-            embedding = voice_embeddings[voice]
-            samples, sample_rate = tts_engine.synthesize_with_embedding(
-                request.input, embedding, temperature=temperature,
-            )
+    # Validate voice name
+    if voice != "default" and voice not in voice_embeddings:
+        available = ", ".join(["default"] + sorted(voice_embeddings.keys()))
+        raise HTTPException(status_code=400, detail={"error": {"message": f"Unknown voice '{request.voice}'. Available: {available}", "type": "invalid_request_error"}})
+
+    try:
+        def _do_synthesis():
+            with _synthesis_lock:
+                if voice == "default":
+                    return tts_engine.synthesize(
+                        request.input, temperature=temperature,
+                    )
+                else:
+                    embedding = voice_embeddings[voice]
+                    return tts_engine.synthesize_with_embedding(
+                        request.input, embedding, temperature=temperature,
+                    )
+
+        loop = asyncio.get_event_loop()
+        samples, sample_rate = await loop.run_in_executor(None, _do_synthesis)
 
         wav_data = pcm_float32_to_wav(samples, sample_rate)
         return Response(content=wav_data, media_type="audio/wav")

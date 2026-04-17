@@ -228,7 +228,10 @@ class QwenTTS:
             err = self._get_error()
             raise RuntimeError(f"Synthesis failed: {err}")
         audio = audio_ptr.contents
-        samples = [audio.samples[i] for i in range(audio.n_samples)]
+        n = audio.n_samples
+        # Bulk copy via ctypes cast (much faster than per-element access)
+        arr = ctypes.cast(audio.samples, ctypes.POINTER(ctypes.c_float * n)).contents
+        samples = list(arr)
         sample_rate = audio.sample_rate
         self._lib.qwen3_tts_free_audio(audio_ptr)
         return samples, sample_rate
