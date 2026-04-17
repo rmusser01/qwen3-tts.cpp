@@ -316,6 +316,78 @@ At runtime, each component logs its selected backend (for example, `TTSTransform
 - `QWEN3_TTS_DECODER_GPU_MAX_FRAMES` controls max frames per CUDA vocoder chunk (default: `34`)
 - `QWEN3_TTS_DECODER_GPU_CONTEXT_FRAMES` controls left-context frames per CUDA vocoder chunk (default: `12`)
 
+## C API
+
+The shared library `libqwen3tts.{so,dylib,dll}` is built automatically by CMake (the `qwen3tts_shared` target). It provides a C-linkage API for FFI integration from Python, Rust, Nim, Go, etc.
+
+### Structs
+
+```c
+typedef struct Qwen3TtsParams {
+    int32_t max_audio_tokens;    // default: 4096
+    float   temperature;         // default: 0.9, 0=greedy
+    float   top_p;               // default: 1.0
+    int32_t top_k;               // default: 50, 0=disabled
+    int32_t n_threads;           // default: 4
+    float   repetition_penalty;  // default: 1.05
+    int32_t language_id;         // 2050=en, 2058=ja, 2055=zh, etc.
+} Qwen3TtsParams;
+
+typedef struct Qwen3TtsAudio {
+    const float* samples;  // PCM float32 mono, 24kHz
+    int32_t n_samples;
+    int32_t sample_rate;   // always 24000
+} Qwen3TtsAudio;
+```
+
+### Functions
+
+| Function | Description |
+|---|---|
+| `qwen3_tts_default_params(params)` | Fill `Qwen3TtsParams` with defaults |
+| `qwen3_tts_create(model_dir, n_threads)` | Load models, return opaque handle (NULL on failure) |
+| `qwen3_tts_is_loaded(tts)` | Check if models are loaded |
+| `qwen3_tts_synthesize(tts, text, params)` | Text to audio |
+| `qwen3_tts_synthesize_with_voice_file(tts, text, wav_path, params)` | Voice clone from WAV |
+| `qwen3_tts_synthesize_with_voice_samples(tts, text, samples, n, params)` | Voice clone from float32 |
+| `qwen3_tts_extract_embedding_file(tts, wav_path, buf, max)` | Extract speaker embedding |
+| `qwen3_tts_synthesize_with_embedding(tts, text, emb, size, params)` | Synthesize with cached embedding |
+| `qwen3_tts_sample_rate(tts)` | Returns 24000 |
+| `qwen3_tts_free_audio(audio)` | Free `Qwen3TtsAudio*` (required) |
+| `qwen3_tts_destroy(tts)` | Destroy engine |
+| `qwen3_tts_get_error(tts)` | Get last error string |
+
+### C Usage Example
+
+```c
+#include "qwen3tts_c_api.h"
+
+Qwen3Tts *tts = qwen3_tts_create("./models", 4);
+if (!tts) { fprintf(stderr, "load failed\n"); return 1; }
+
+Qwen3TtsParams params;
+qwen3_tts_default_params(&params);
+
+Qwen3TtsAudio *audio = qwen3_tts_synthesize(tts, "Hello, world!", &params);
+if (audio) {
+    // audio->samples is PCM float32, audio->n_samples samples at 24kHz
+    // ... write to WAV file ...
+    qwen3_tts_free_audio(audio);
+}
+
+qwen3_tts_destroy(tts);
+```
+
+### Python ctypes
+
+A full Python binding is provided in `server/qwen3_tts_binding.py`. See the [Server README](server/README.md) for an OpenAI-compatible HTTP API.
+
+### Memory Management
+
+- Every `Qwen3TtsAudio*` returned by synthesis functions must be freed with `qwen3_tts_free_audio()`
+- The engine handle must be destroyed with `qwen3_tts_destroy()`
+- The `qwen3_tts_get_error()` string is owned by the engine and valid until the next API call
+
 ## Architecture
 
 ```

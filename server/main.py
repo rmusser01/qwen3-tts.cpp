@@ -1,0 +1,182 @@
+"""OpenAI-compatible TTS server for qwen3-tts.cpp.
+
+Serves POST /v1/audio/speech following the OpenAI TTS API spec.
+Uses the qwen3-tts C shared library via ctypes.
+"""
+
+import io
+import json
+import os
+import struct
+import sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
+from pydantic import BaseModel, Field
+
+from qwen3_tts_binding import QwenTTS
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+MODEL_DIR = os.environ.get("QWEN3TTS_MODEL_DIR", str(Path(__file__).parent.parent / "models"))
+VOICES_DIR = os.environ.get("QWEN3TTS_VOICES_DIR", str(Path(__file__).parent.parent / "voices"))
+N_THREADS = int(os.environ.get("QWEN3TTS_THREADS", "4"))
+
+# ---------------------------------------------------------------------------
+# Global state
+# ---------------------------------------------------------------------------
+
+tts_engine: QwenTTS | None = None
+voice_embeddings: dict[str, list[float]] = {}
+
+
+def load_voices():
+    """Scan voices/ directory and cache speaker embeddings."""
+    voices_path = Path(VOICES_DIR)
+    if not voices_path.is_dir():
+        return
+    for f in voices_path.glob("*.json"):
+        try:
+            data = json.loads(f.read_text())
+            if "data" in data and isinstance(data["data"], list):
+                voice_embeddings[f.stem] = data["data"]
+                print(f"  Loaded voice: {f.stem} ({len(data['data'])} dims)")
+        except Exception as e:
+            print(f"  Warning: failed to load voice {f.name}: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load TTS engine and voices at startup."""
+    global tts_engine
+    print(f"Loading qwen3-tts models from: {MODEL_DIR}")
+    tts_engine = QwenTTS(MODEL_DIR, n_threads=N_THREADS)
+    print(f"Models loaded. Scanning voices from: {VOICES_DIR}")
+    load_voices()
+    print(f"Ready. {len(voice_embeddings)} voice(s) available.")
+    yield
+    if tts_engine:
+        tts_engine.close()
+        tts_engine = None
+
+
+app = FastAPI(title="qwen3-tts server", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# WAV encoding
+# ---------------------------------------------------------------------------
+
+def pcm_float32_to_wav(samples: list[float], sample_rate: int) -> bytes:
+    """Pack PCM float32 samples into a WAV file (IEEE float format)."""
+    n_samples = len(samples)
+    n_channels = 1
+    bits_per_sample = 32
+    byte_rate = sample_rate * n_channels * (bits_per_sample // 8)
+    block_align = n_channels * (bits_per_sample // 8)
+    data_size = n_samples * (bits_per_sample // 8)
+
+    buf = io.BytesIO()
+    # RIFF header
+    buf.write(b"RIFF")
+    buf.write(struct.pack("<I", 36 + data_size))  # file size - 8
+    buf.write(b"WAVE")
+    # fmt chunk (format tag 3 = IEEE float)
+    buf.write(b"fmt ")
+    buf.write(struct.pack("<I", 16))  # chunk size
+    buf.write(struct.pack("<H", 3))   # format: IEEE float
+    buf.write(struct.pack("<H", n_channels))
+    buf.write(struct.pack("<I", sample_rate))
+    buf.write(struct.pack("<I", byte_rate))
+    buf.write(struct.pack("<H", block_align))
+    buf.write(struct.pack("<H", bits_per_sample))
+    # data chunk
+    buf.write(b"data")
+    buf.write(struct.pack("<I", data_size))
+    buf.write(struct.pack(f"<{n_samples}f", *samples))
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Request/response models
+# ---------------------------------------------------------------------------
+
+class SpeechRequest(BaseModel):
+    model: str = "qwen3-tts"
+    input: str
+    voice: str = "default"
+    response_format: str = "wav"
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+
+
+class ErrorDetail(BaseModel):
+    message: str
+    type: str = "server_error"
+
+
+class ErrorResponse(BaseModel):
+    error: ErrorDetail
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/audio/speech")
+async def create_speech(request: SpeechRequest):
+    if not request.input or not request.input.strip():
+        raise HTTPException(status_code=400, detail={"error": {"message": "input is required", "type": "invalid_request_error"}})
+
+    if request.response_format != "wav":
+        raise HTTPException(status_code=400, detail={"error": {"message": f"Unsupported format '{request.response_format}'. Only 'wav' is supported.", "type": "invalid_request_error"}})
+
+    # Map speed to temperature: speed=1.0 → temp=0.9, speed=2.0 → temp=0.45
+    temperature = min(2.0, max(0.1, 0.9 / request.speed))
+
+    try:
+        voice = request.voice.lower()
+
+        if voice == "default" or voice not in voice_embeddings:
+            # Basic synthesis (no voice cloning)
+            samples, sample_rate = tts_engine.synthesize(
+                request.input, temperature=temperature,
+            )
+        else:
+            # Voice-cloned synthesis using cached embedding
+            embedding = voice_embeddings[voice]
+            samples, sample_rate = tts_engine.synthesize_with_embedding(
+                request.input, embedding, temperature=temperature,
+            )
+
+        wav_data = pcm_float32_to_wav(samples, sample_rate)
+        return Response(content=wav_data, media_type="audio/wav")
+
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail={"error": {"message": str(e), "type": "server_error"}})
+
+
+@app.get("/v1/audio/voices")
+async def list_voices():
+    """List available voice names."""
+    voices = ["default"] + sorted(voice_embeddings.keys())
+    return {"voices": voices}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "model_loaded": tts_engine is not None}
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+    host = os.environ.get("QWEN3TTS_HOST", "0.0.0.0")
+    port = int(os.environ.get("QWEN3TTS_PORT", "8000"))
+    uvicorn.run("main:app", host=host, port=port)
