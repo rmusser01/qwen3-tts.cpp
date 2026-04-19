@@ -89,7 +89,7 @@ extern "C" {
 
 void qwen3_tts_default_params(Qwen3TtsParams * params) {
     if (!params) return;
-    params->max_audio_tokens  = 4096;
+    params->max_audio_tokens  = 2048;
     params->temperature       = 0.9f;
     params->top_p             = 1.0f;
     params->top_k             = 50;

@@ -152,7 +152,7 @@ class QwenTTS:
         temperature: float = 0.9,
         top_k: int = 50,
         language_id: int = 2050,
-        max_audio_tokens: int = 4096,
+        max_audio_tokens: int = 2048,
         repetition_penalty: float = 1.05,
     ) -> tuple[list[float], int]:
         """Synthesize text to audio. Returns (samples, sample_rate)."""
@@ -172,7 +172,7 @@ class QwenTTS:
         temperature: float = 0.9,
         top_k: int = 50,
         language_id: int = 2050,
-        max_audio_tokens: int = 4096,
+        max_audio_tokens: int = 2048,
         repetition_penalty: float = 1.05,
     ) -> tuple[list[float], int]:
         """Synthesize with a pre-computed speaker embedding."""

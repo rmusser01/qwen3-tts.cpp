@@ -13,7 +13,7 @@ typedef struct Qwen3Tts Qwen3Tts;
 
 /* Generation parameters */
 typedef struct Qwen3TtsParams {
-    int32_t max_audio_tokens;    /* default: 4096 */
+    int32_t max_audio_tokens;    /* default: 2048 */
     float   temperature;         /* default: 0.9, 0=greedy */
     float   top_p;               /* default: 1.0 */
     int32_t top_k;               /* default: 50, 0=disabled */

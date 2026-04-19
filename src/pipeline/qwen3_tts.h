@@ -15,7 +15,7 @@ namespace qwen3_tts {
 // TTS generation parameters
 struct tts_params {
     // Maximum number of audio tokens to generate
-    int32_t max_audio_tokens = 4096;
+    int32_t max_audio_tokens = 2048;
     
     // Temperature for sampling (0 = greedy)
     float temperature = 0.9f;

@@ -305,11 +305,11 @@ Place both `.gguf` files in a `models/` directory.
 | `-r, --reference <file>` | Reference audio for voice cloning | (none) |
 | `--speaker-embedding <file>` | Use precomputed speaker embedding (.json/.bin) | (none) |
 | `--dump-speaker-embedding <file>` | Save extracted embedding from `--reference` | (none) |
-| `--instruction, --instruct <text>` | Voice steering instruction (e.g. "Speak happily") | (none) |
+| `-i, --instruction, --instruct <text>` | Voice steering instruction (e.g. "Speak happily") | (none) |
 | `--temperature <val>` | Sampling temperature (0 = greedy) | 0.9 |
 | `--top-k <n>` | Top-k sampling (0 = disabled) | 50 |
 | `--top-p <val>` | Top-p (nucleus) sampling cutoff | 1.0 |
-| `--max-tokens <n>` | Maximum audio frames (codec tokens) to generate | 4096 |
+| `--max-tokens <n>` | Maximum audio frames (codec tokens) to generate | 2048 |
 | `--repetition-penalty <val>` | Repetition penalty on codebook-0 token generation | 1.05 |
 | `--seed <n>` | RNG seed for reproducible output | (random) |
 | `--no-f32-acc` | Disable f32 matmul accumulation (faster, less precise) | (off) |
@@ -386,7 +386,7 @@ The shared library `libqwen3tts.{so,dylib,dll}` is built automatically by CMake 
 
 ```c
 typedef struct Qwen3TtsParams {
-    int32_t max_audio_tokens;    // default: 4096
+    int32_t max_audio_tokens;    // default: 2048
     float   temperature;         // default: 0.9, 0=greedy
     float   top_p;               // default: 1.0
     int32_t top_k;               // default: 50, 0=disabled
