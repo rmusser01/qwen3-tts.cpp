@@ -4,12 +4,12 @@ OpenAI-compatible TTS HTTP server backed by the qwen3-tts.cpp shared library.
 
 ## Prerequisites
 
-1. Build qwen3-tts.cpp with the shared library (done by default):
+1. Build qwen3-tts.cpp with the shared library (done by default — works on macOS/Linux/Windows, CPU-only or any GPU backend; see main README for per-platform build instructions):
    ```bash
    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
    cmake --build build -j$(nproc)
    ```
-   This produces `build/libqwen3tts.{so,dylib}`.
+   This produces `build/libqwen3tts.{so,dylib,dll}`. On Windows, copy the GGML DLLs (`ggml.dll`, `ggml-base.dll`, `ggml-cpu.dll`, and any backend DLL) into the same directory as `libqwen3tts.dll` before launching the server, or point `QWEN3TTS_LIB_PATH` at an absolute path whose directory holds them.
 
 2. Download or convert GGUF models into `models/` (see main README).
 

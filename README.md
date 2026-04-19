@@ -118,67 +118,115 @@ git submodule update --init --recursive
 
 > **Note:** The top-level CMake expects GGML in `./ggml` with libraries under `./ggml/build/src`.
 
-### macOS (Metal)
+### Build matrix
+
+Pick the row that matches your platform and GPU. CPU backend is always compiled in — GPU flags just add an additional backend that `QWEN3_TTS_BACKEND=auto` (the default) will prefer when available.
+
+| Platform | Mode | GGML flags (step 1) | Notes |
+|---|---|---|---|
+| macOS (Apple Silicon / Intel) | Metal + CPU (default) | *(none — Metal and Apple Accelerate BLAS are default-on)* | CoreML code predictor also enabled by default; see below. |
+| macOS | CPU only | `-DGGML_METAL=OFF -DGGML_BLAS=OFF` + top-level `-DQWEN3_TTS_COREML=OFF` | Useful for bisecting GPU issues or on machines without a usable GPU. |
+| Linux | CPU only | *(none)* | Opt into BLAS with `-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS` (or similar) if installed. |
+| Linux | Vulkan + CPU | `-DGGML_VULKAN=ON` | Works on AMD, NVIDIA, Intel; install the [Vulkan SDK](https://vulkan.lunarg.com/) first. |
+| Linux | CUDA + CPU | `-DGGML_CUDA=ON` | NVIDIA only; requires the [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit). |
+| Windows (MSVC) | CPU only | *(none)* | Open a Developer Command Prompt for VS 2019/2022. |
+| Windows | Vulkan + CPU | `-DGGML_VULKAN=ON` | Copy `ggml-vulkan.dll` next to `qwen3-tts-cli.exe`. |
+| Windows | CUDA + CPU | `-DGGML_CUDA=ON` | Copy `ggml-cuda.dll` next to `qwen3-tts-cli.exe`. |
+
+"GPU + CPU" is the normal operating mode for any GPU build — the GGML scheduler runs most work on GPU with automatic CPU fallback for unsupported ops. See [Backend Selection](#backend-selection) for how to force one or the other at runtime.
+
+### macOS (Metal + CoreML, default)
 
 ```bash
-# Build GGML with Metal GPU acceleration
-cmake -S ggml -B ggml/build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
+# Step 1: Build GGML. Metal and Accelerate BLAS are on by default on Apple;
+# passing -DGGML_METAL=ON is optional and just makes the intent explicit.
+cmake -S ggml -B ggml/build -DCMAKE_BUILD_TYPE=Release
 cmake --build ggml/build -j$(sysctl -n hw.ncpu)
 
-# Build qwen3-tts.cpp
+# Step 2: Build qwen3-tts.cpp. QWEN3_TTS_COREML is ON by default on APPLE.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(sysctl -n hw.ncpu)
 ```
 
-CoreML acceleration for the code predictor stage is enabled by default when the model exists. Generate it with `python scripts/setup_pipeline_models.py --coreml on`.
+CoreML acceleration for the code predictor stage is enabled by default when `models/coreml/code_predictor.mlpackage` exists. Generate that with `python scripts/setup_pipeline_models.py --coreml on`. Turn CoreML off at runtime with `QWEN3_TTS_USE_COREML=0` or at compile time with `-DQWEN3_TTS_COREML=OFF`.
 
-### Linux (Vulkan)
+### macOS (CPU only)
+
+```bash
+# Disable Metal, Accelerate BLAS, and the CoreML code predictor bridge.
+cmake -S ggml -B ggml/build -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_METAL=OFF -DGGML_BLAS=OFF
+cmake --build ggml/build -j$(sysctl -n hw.ncpu)
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DQWEN3_TTS_COREML=OFF
+cmake --build build -j$(sysctl -n hw.ncpu)
+```
+
+You can also keep a Metal build and force CPU at runtime with `QWEN3_TTS_BACKEND=cpu` — no rebuild required.
+
+### Linux (CPU only)
+
+```bash
+cmake -S ggml -B ggml/build -DCMAKE_BUILD_TYPE=Release
+cmake --build ggml/build -j$(nproc)
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+```
+
+### Linux (Vulkan + CPU)
 
 Install the [Vulkan SDK](https://vulkan.lunarg.com/) first, then:
 
 ```bash
-# Build GGML with Vulkan
 cmake -S ggml -B ggml/build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build ggml/build -j$(nproc)
 
-# Build qwen3-tts.cpp
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-### Linux (CUDA)
+### Linux (CUDA + CPU)
 
 Requires the [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit), then:
 
 ```bash
-# Build GGML with CUDA
 cmake -S ggml -B ggml/build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build ggml/build -j$(nproc)
 
-# Build qwen3-tts.cpp
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-At runtime, set `QWEN3_TTS_BACKEND=cuda` to force the CUDA backend (see [Backend Selection](#backend-selection)).
+At runtime, set `QWEN3_TTS_BACKEND=cuda` to force the CUDA backend, or leave it at the default `auto` to let the scheduler pick it when available (see [Backend Selection](#backend-selection)).
 
 ### Windows (MSVC)
 
-Open a **Developer Command Prompt for VS 2022** (or 2019), then:
+Open a **Developer Command Prompt for VS 2022** (or 2019), then pick one:
 
 ```cmd
-:: Build GGML (CPU-only; add -DGGML_VULKAN=ON or -DGGML_CUDA=ON for GPU)
+:: CPU only (default)
 cmake -S ggml -B ggml\build -DCMAKE_BUILD_TYPE=Release
 cmake --build ggml\build --config Release
 
-:: Build qwen3-tts.cpp
+:: Vulkan + CPU (install Vulkan SDK from https://vulkan.lunarg.com/)
+:: cmake -S ggml -B ggml\build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+
+:: CUDA + CPU (install CUDA Toolkit)
+:: cmake -S ggml -B ggml\build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+
+:: Then build qwen3-tts.cpp against the chosen GGML build.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-**DLL placement:** Copy `ggml.dll`, `ggml-base.dll`, `ggml-cpu.dll`, and the backend DLL (e.g. `ggml-vulkan.dll` or `ggml-cuda.dll`) into the same directory as `qwen3-tts-cli.exe`.
+**DLL placement:** Copy these DLLs next to `qwen3-tts-cli.exe` (and `libqwen3tts.dll` if you use the shared lib):
 
-For Vulkan on Windows, install the [Vulkan SDK](https://vulkan.lunarg.com/) and add `-DGGML_VULKAN=ON` to the GGML cmake line. For CUDA, add `-DGGML_CUDA=ON`.
+- Always: `ggml.dll`, `ggml-base.dll`, `ggml-cpu.dll`
+- Vulkan build: also `ggml-vulkan.dll`
+- CUDA build: also `ggml-cuda.dll` plus CUDA runtime DLLs from your toolkit install
+
+These are produced under `ggml\build\bin\Release\` (or `ggml\build\src\` depending on generator).
 
 ## Model Setup (Recommended)
 
@@ -257,18 +305,16 @@ Place both `.gguf` files in a `models/` directory.
 | `-r, --reference <file>` | Reference audio for voice cloning | (none) |
 | `--speaker-embedding <file>` | Use precomputed speaker embedding (.json/.bin) | (none) |
 | `--dump-speaker-embedding <file>` | Save extracted embedding from `--reference` | (none) |
-| `--instruction <text>` | Voice steering instruction (e.g. "Speak happily") | (none) |
+| `--instruction, --instruct <text>` | Voice steering instruction (e.g. "Speak happily") | (none) |
 | `--temperature <val>` | Sampling temperature (0 = greedy) | 0.9 |
 | `--top-k <n>` | Top-k sampling (0 = disabled) | 50 |
-| `--max-tokens <n>` | Maximum audio frames to generate | 4096 |
+| `--top-p <val>` | Top-p (nucleus) sampling cutoff | 1.0 |
+| `--max-tokens <n>` | Maximum audio frames (codec tokens) to generate | 4096 |
 | `--repetition-penalty <val>` | Repetition penalty on codebook-0 token generation | 1.05 |
 | `--seed <n>` | RNG seed for reproducible output | (random) |
 | `--no-f32-acc` | Disable f32 matmul accumulation (faster, less precise) | (off) |
 | `-l, --language <lang>` | Language: en, ru, zh, ja, ko, de, fr, es | en |
 | `-j, --threads <n>` | Number of compute threads | 4 |
-
-On macOS, CoreML code predictor is enabled by default when `models/coreml/code_predictor.mlpackage` exists.
-Set `QWEN3_TTS_USE_COREML=0` to disable it. Low-memory mode is opt-in via `QWEN3_TTS_LOW_MEM=1`.
 
 ### Speaker Embedding Workflow
 
@@ -306,15 +352,31 @@ Supported types: `q8_0`, `q4_0`, `q4_1`, `q5_0`, `q5_1`, `q4_k`, `q5_k`, `q6_k`.
 
 ### Backend Selection
 
-At runtime, each component logs its selected backend (for example, `TTSTransformer backend: MTL0` or `BLAS`).
+At runtime, each component (tokenizer, encoder, transformer, decoder) independently selects a backend and logs it — for example, `TTSTransformer backend: MTL0` or `AudioTokenizerDecoder backend: Vulkan0`.
 
-- Preferred order: `IGPU` -> `GPU` -> `ACCEL` -> `CPU`
-- Encoder and transformer can run on Metal/other accelerators with CPU fallback in the scheduler
-- Decoder now follows the same backend preference and will use Metal when available
-- `QWEN3_TTS_BACKEND` overrides runtime selection: `auto` (default), `cuda`, or `cpu`
-- `QWEN3_TTS_DEVICE` selects CUDA device index when `QWEN3_TTS_BACKEND=cuda` (default device is index 0)
-- `QWEN3_TTS_DECODER_GPU_MAX_FRAMES` controls max frames per CUDA vocoder chunk (default: `34`)
-- `QWEN3_TTS_DECODER_GPU_CONTEXT_FRAMES` controls left-context frames per CUDA vocoder chunk (default: `12`)
+`QWEN3_TTS_BACKEND` controls the selection:
+
+| Value | Effect |
+|---|---|
+| `auto` (default) | Scheduler picks the best available device in the order `IGPU` → `GPU` → `ACCEL` → `CPU`. Metal, Vulkan, and CUDA all surface through `auto` when the corresponding GGML flag was enabled at build time. |
+| `cpu` | Forces CPU-only execution regardless of what was built in. Useful for reproducibility and for bisecting GPU issues without rebuilding. |
+| `cuda` | Forces the CUDA backend. Only valid when GGML was built with `-DGGML_CUDA=ON`; otherwise falls back to CPU with a warning. |
+
+There is no separate `metal` or `vulkan` value — those are reached via `auto`. If you need to disable them, either rebuild without their GGML flag or set `QWEN3_TTS_BACKEND=cpu`.
+
+"Hybrid GPU + CPU" is the default behavior of any GPU build: the GGML scheduler keeps most work on the GPU and automatically falls back to CPU for ops the GPU backend does not support.
+
+### Runtime environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `QWEN3_TTS_BACKEND` | `auto` | Runtime backend override. See [Backend Selection](#backend-selection). |
+| `QWEN3_TTS_DEVICE` | `0` | CUDA device index when `QWEN3_TTS_BACKEND=cuda`. Ignored otherwise. |
+| `QWEN3_TTS_DECODER_GPU_MAX_FRAMES` | `34` | Max frames per CUDA vocoder chunk. Lower it if the GPU OOMs during decode. |
+| `QWEN3_TTS_DECODER_GPU_CONTEXT_FRAMES` | `12` | Left-context frames per CUDA vocoder chunk. |
+| `QWEN3_TTS_LOW_MEM` | unset | Set to `1` to enable low-memory pipeline mode (loads/unloads components in sequence instead of holding everything resident). |
+| `QWEN3_TTS_USE_COREML` | `1` on macOS when model exists | Set to `0` to disable the CoreML code-predictor bridge without rebuilding. |
+| `QWEN3_TTS_COREML_MODEL` | auto-detected | Absolute path override for a custom `.mlpackage` location (macOS only). |
 
 ## C API
 
@@ -429,7 +491,11 @@ The prefill embedding mirrors the Python pipeline exactly:
 ## Testing
 
 ```bash
-# Run full test suite
+# End-to-end user smoketest (macOS): build → download → synthesize on
+# Metal + CPU × F16 + Q8_0 × basic/clone/instruction + Python server
+bash scripts/run_user_smoketest.sh            # see scripts/USER_SMOKETEST.md
+
+# Run full test suite (component + E2E reference comparison)
 bash scripts/run_all_tests.sh
 
 # Individual component tests
