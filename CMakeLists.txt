@@ -44,7 +44,7 @@ else()
 endif()
 
 # Common library (gguf_loader + coreml bridge — compiled once, shared by all)
-set(COMMON_SOURCES src/common/gguf_loader.cpp src/common/speaker_embedding_io.cpp)
+set(COMMON_SOURCES src/common/gguf_loader.cpp src/common/speaker_embedding_io.cpp src/common/gpu_offload_policy.cpp)
 if(APPLE AND QWEN3_TTS_COREML)
     list(APPEND COMMON_SOURCES src/common/coreml_code_predictor.mm)
     set_source_files_properties(src/common/coreml_code_predictor.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
@@ -149,6 +149,14 @@ target_link_libraries(test_tokenizer PRIVATE
     Threads::Threads
 )
 
+# Test executable for GPU offload policy
+add_executable(test_gpu_offload_policy
+    tests/test_gpu_offload_policy.cpp
+)
+target_link_libraries(test_gpu_offload_policy PRIVATE
+    qwen3_tts_common
+)
+
 # Test executable for audio encoder
 add_executable(test_encoder
     tests/test_encoder.cpp
@@ -194,6 +202,7 @@ install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_cod
 )
 install(FILES
     src/common/gguf_loader.h
+    src/common/gpu_offload_policy.h
     src/common/coreml_code_predictor.h
     src/tokenizer/text_tokenizer.h
     src/transformer/tts_transformer.h
@@ -208,6 +217,10 @@ install(FILES
 enable_testing()
 add_test(NAME tokenizer_test
     COMMAND test_tokenizer
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME gpu_offload_policy_test
+    COMMAND test_gpu_offload_policy
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 add_test(NAME encoder_test
