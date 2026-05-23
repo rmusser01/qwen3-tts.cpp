@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/weight_residency.h"
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "gguf.h"
@@ -144,6 +145,9 @@ struct audio_decoder_model {
     
     // Tensor name to tensor mapping
     std::map<std::string, struct ggml_tensor *> tensors;
+
+    weight_residency residency = weight_residency::Unloaded;
+    host_tensor_store host_weights;
 };
 
 // Compute state for decoder
@@ -173,6 +177,12 @@ public:
     // Returns: audio samples normalized to [-1, 1] at 24kHz
     bool decode(const int32_t * codes, int32_t n_frames,
                 std::vector<float> & samples);
+
+    bool can_offload_to_ram() const;
+    bool offload_weights_to_ram(std::string & error);
+    bool reload_weights_from_ram(std::string & error);
+    bool is_ram_offloaded() const;
+    size_t ram_offloaded_bytes() const;
     
     const audio_decoder_config & get_config() const { return model_.config; }
     
@@ -188,6 +198,7 @@ private:
                              std::vector<float> & samples,
                              int32_t max_gpu_frames, int32_t context_frames_cfg);
     int64_t output_samples_for_frames(int32_t n_frames) const;
+    bool require_weights_gpu_resident();
     
     // Apply Snake activation: x + (1/alpha) * sin^2(alpha * x)
     struct ggml_tensor * apply_snake(struct ggml_context * ctx,

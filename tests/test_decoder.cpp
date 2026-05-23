@@ -74,6 +74,39 @@ int main(int argc, char ** argv) {
     auto config = decoder.get_config();
     printf("  Config: sample_rate=%d, n_codebooks=%d, codebook_size=%d\n",
            config.sample_rate, config.n_codebooks, config.codebook_size);
+    if (decoder.is_ram_offloaded()) {
+        fprintf(stderr, "  FAIL: decoder should not start RAM-offloaded\n");
+        return 1;
+    }
+    if (decoder.can_offload_to_ram()) {
+        std::string offload_error;
+        if (!decoder.offload_weights_to_ram(offload_error)) {
+            fprintf(stderr, "  FAIL: decoder offload failed: %s\n", offload_error.c_str());
+            return 1;
+        }
+        if (!decoder.is_ram_offloaded()) {
+            fprintf(stderr, "  FAIL: decoder did not enter RAM-resident state\n");
+            return 1;
+        }
+        if (decoder.ram_offloaded_bytes() == 0) {
+            fprintf(stderr, "  FAIL: decoder did not retain RAM-resident weights\n");
+            return 1;
+        }
+        std::vector<float> offloaded_samples;
+        std::vector<int32_t> dummy_codes(config.n_codebooks, 0);
+        if (decoder.decode(dummy_codes.data(), 1, offloaded_samples)) {
+            fprintf(stderr, "  FAIL: decoder allowed decode while RAM-resident\n");
+            return 1;
+        }
+        if (!decoder.reload_weights_from_ram(offload_error)) {
+            fprintf(stderr, "  FAIL: decoder reload failed: %s\n", offload_error.c_str());
+            return 1;
+        }
+        if (decoder.ram_offloaded_bytes() != 0) {
+            fprintf(stderr, "  FAIL: decoder retained RAM-resident weights after reload\n");
+            return 1;
+        }
+    }
     printf("\n");
     
     printf("Test 2: Load speech codes from %s\n", codes_path);

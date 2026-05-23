@@ -35,6 +35,40 @@ static int32_t get_env_i32(const char * key, int32_t default_value) {
     return (int32_t) parsed;
 }
 
+namespace {
+
+bool create_decoder_scheduler(audio_decoder_state & state, std::string & error) {
+    std::vector<ggml_backend_t> backends;
+    backends.push_back(state.backend);
+    if (state.backend_cpu) {
+        backends.push_back(state.backend_cpu);
+    }
+
+    state.sched = ggml_backend_sched_new(backends.data(), nullptr, (int) backends.size(),
+                                         QWEN3_TTS_DEC_MAX_NODES, false, true);
+    if (!state.sched) {
+        error = "Failed to create backend scheduler";
+        return false;
+    }
+    return true;
+}
+
+void clear_context_tensor_allocations(ggml_context * ctx) {
+    if (!ctx) {
+        return;
+    }
+
+    for (ggml_tensor * tensor = ggml_get_first_tensor(ctx);
+         tensor;
+         tensor = ggml_get_next_tensor(ctx, tensor)) {
+        tensor->buffer = nullptr;
+        tensor->data = nullptr;
+        tensor->extra = nullptr;
+    }
+}
+
+} // namespace
+
 AudioTokenizerDecoder::AudioTokenizerDecoder() = default;
 
 AudioTokenizerDecoder::~AudioTokenizerDecoder() {
@@ -381,19 +415,128 @@ bool AudioTokenizerDecoder::load_model(const std::string & model_path) {
         }
     }
 
-    std::vector<ggml_backend_t> backends;
-    backends.push_back(state_.backend);
-    if (state_.backend_cpu) {
-        backends.push_back(state_.backend_cpu);
-    }
-    state_.sched = ggml_backend_sched_new(backends.data(), nullptr, (int)backends.size(), QWEN3_TTS_DEC_MAX_NODES, false, true);
-    if (!state_.sched) {
-        error_msg_ = "Failed to create backend scheduler";
+    if (!create_decoder_scheduler(state_, error_msg_)) {
         return false;
     }
 
     state_.compute_meta.resize(ggml_tensor_overhead() * QWEN3_TTS_DEC_MAX_NODES + ggml_graph_overhead());
+
+    model_.host_weights.clear();
+    model_.residency = weight_residency::GpuResident;
     
+    return true;
+}
+
+bool AudioTokenizerDecoder::can_offload_to_ram() const {
+    return model_.residency == weight_residency::GpuResident &&
+           model_.buffer != nullptr &&
+           backend_is_cuda_or_vulkan(state_.backend);
+}
+
+bool AudioTokenizerDecoder::offload_weights_to_ram(std::string & error) {
+    error.clear();
+
+    if (model_.residency == weight_residency::RamResident) {
+        return true;
+    }
+    if (model_.residency != weight_residency::GpuResident) {
+        error = "Cannot offload decoder weights: model weights are not GPU-resident";
+        return false;
+    }
+    if (!model_.buffer) {
+        error = "Cannot offload decoder weights: model buffer is null";
+        return false;
+    }
+    if (!can_offload_to_ram()) {
+        error = "Cannot offload decoder weights: backend does not support RAM offload";
+        return false;
+    }
+
+    if (state_.sched) {
+        ggml_backend_sched_reset(state_.sched);
+    }
+
+    if (!download_tensors_to_host(model_.tensors, model_.host_weights, error)) {
+        model_.host_weights.clear();
+        model_.residency = weight_residency::GpuResident;
+        return false;
+    }
+
+    if (state_.sched) {
+        ggml_backend_sched_free(state_.sched);
+        state_.sched = nullptr;
+    }
+    ggml_backend_buffer_free(model_.buffer);
+    model_.buffer = nullptr;
+    clear_context_tensor_allocations(model_.ctx);
+    model_.residency = weight_residency::RamResident;
+    codes_buf_.clear();
+    return true;
+}
+
+bool AudioTokenizerDecoder::reload_weights_from_ram(std::string & error) {
+    error.clear();
+
+    if (model_.residency == weight_residency::GpuResident) {
+        return true;
+    }
+    if (model_.residency != weight_residency::RamResident) {
+        error = "Cannot reload decoder weights: model weights are not RAM-resident";
+        return false;
+    }
+    if (!model_.ctx) {
+        error = "Cannot reload decoder weights: ggml context is null";
+        return false;
+    }
+    if (!state_.backend) {
+        error = "Cannot reload decoder weights: backend is null";
+        return false;
+    }
+    if (model_.host_weights.tensors.empty() || model_.host_weights.total_bytes == 0) {
+        error = "Cannot reload decoder weights: host tensor store is empty";
+        return false;
+    }
+    if (model_.buffer) {
+        error = "Cannot reload decoder weights: model buffer must be null";
+        return false;
+    }
+
+    if (!upload_tensors_from_host(model_.ctx, model_.tensors, state_.backend,
+                                  model_.host_weights, model_.buffer, error)) {
+        model_.buffer = nullptr;
+        model_.residency = weight_residency::RamResident;
+        return false;
+    }
+
+    if (!state_.sched && !create_decoder_scheduler(state_, error)) {
+        ggml_backend_buffer_free(model_.buffer);
+        model_.buffer = nullptr;
+        clear_context_tensor_allocations(model_.ctx);
+        model_.residency = weight_residency::RamResident;
+        if (error.empty()) {
+            error = "Failed to recreate decoder scheduler after weight reload";
+        }
+        return false;
+    }
+
+    model_.host_weights.clear();
+    model_.residency = weight_residency::GpuResident;
+    return true;
+}
+
+bool AudioTokenizerDecoder::is_ram_offloaded() const {
+    return model_.residency == weight_residency::RamResident;
+}
+
+size_t AudioTokenizerDecoder::ram_offloaded_bytes() const {
+    return model_.host_weights.total_bytes;
+}
+
+bool AudioTokenizerDecoder::require_weights_gpu_resident() {
+    if (model_.residency == weight_residency::RamResident) {
+        error_msg_ = "Audio decoder weights are RAM-offloaded; reload_weights_from_ram() first";
+        return false;
+    }
     return true;
 }
 
@@ -987,6 +1130,10 @@ bool AudioTokenizerDecoder::decode_chunked_cuda(const int32_t * codes, int32_t n
 
 bool AudioTokenizerDecoder::decode(const int32_t * codes, int32_t n_frames,
                                     std::vector<float> & samples) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -1017,6 +1164,8 @@ void free_audio_decoder_model(audio_decoder_model & model) {
         ggml_free(model.ctx);
         model.ctx = nullptr;
     }
+    model.host_weights.clear();
+    model.residency = weight_residency::Unloaded;
     model.tensors.clear();
 }
 
