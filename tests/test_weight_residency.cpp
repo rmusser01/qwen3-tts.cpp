@@ -171,6 +171,57 @@ static int run_upload_rejects_non_null_buffer() {
     return result;
 }
 
+static int run_upload_rejects_wrong_context_tensor() {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    if (!backend) return fail("backend init failed");
+
+    ggml_init_params params = {
+        /*.mem_size   =*/ ggml_tensor_overhead() * 2,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context * ctx_a = ggml_init(params);
+    ggml_context * ctx_b = ggml_init(params);
+    if (!ctx_a || !ctx_b) {
+        if (ctx_a) ggml_free(ctx_a);
+        if (ctx_b) ggml_free(ctx_b);
+        ggml_backend_free(backend);
+        return fail("ggml_init failed");
+    }
+
+    ggml_tensor * ctx_a_tensor = ggml_new_tensor_1d(ctx_a, GGML_TYPE_F32, 4);
+    ggml_set_name(ctx_a_tensor, "ctx_a.weight");
+    ggml_tensor * ctx_b_tensor = ggml_new_tensor_1d(ctx_b, GGML_TYPE_F32, 4);
+    ggml_set_name(ctx_b_tensor, "test.weight");
+
+    std::map<std::string, ggml_tensor *> tensors;
+    tensors["test.weight"] = ctx_b_tensor;
+
+    qwen3_tts::host_tensor_store store;
+    qwen3_tts::host_tensor_copy copy;
+    copy.name = "test.weight";
+    copy.bytes.resize(4 * sizeof(float));
+    store.total_bytes = copy.bytes.size();
+    store.tensors.push_back(copy);
+
+    ggml_backend_buffer_t buffer = nullptr;
+    std::string error;
+    const bool ok = qwen3_tts::upload_tensors_from_host(ctx_a, tensors, backend, store, buffer, error);
+    const bool buffer_changed = buffer != nullptr;
+
+    if (buffer) ggml_backend_buffer_free(buffer);
+    ggml_free(ctx_b);
+    ggml_free(ctx_a);
+    ggml_backend_free(backend);
+
+    if (ok) return fail("upload accepted wrong-context tensor");
+    if (error.find("context") == std::string::npos && error.find("ownership") == std::string::npos) {
+        return fail("wrong-context tensor error mismatch");
+    }
+    if (buffer_changed) return fail("wrong-context failure changed buffer");
+    return 0;
+}
+
 static int run_backend_roundtrip(enum ggml_backend_dev_type type, bool optional) {
     ggml_backend_t backend = ggml_backend_init_by_type(type, nullptr);
     if (!backend) {
@@ -228,6 +279,7 @@ int main() {
     if (run_download_rejects_unallocated_tensor() != 0) return 1;
     if (run_upload_rejects_missing_destination() != 0) return 1;
     if (run_upload_rejects_non_null_buffer() != 0) return 1;
+    if (run_upload_rejects_wrong_context_tensor() != 0) return 1;
     if (run_backend_roundtrip(GGML_BACKEND_DEVICE_TYPE_CPU, false) != 0) return 1;
     if (run_backend_roundtrip(GGML_BACKEND_DEVICE_TYPE_GPU, true) != 0) return 1;
     std::printf("weight_residency tests passed\n");

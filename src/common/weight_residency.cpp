@@ -51,6 +51,17 @@ void restore_context_tensors(const std::vector<tensor_allocation_state> & states
     }
 }
 
+bool tensor_belongs_to_context(ggml_context * ctx, const ggml_tensor * target) {
+    for (ggml_tensor * tensor = ggml_get_first_tensor(ctx);
+         tensor;
+         tensor = ggml_get_next_tensor(ctx, tensor)) {
+        if (tensor == target) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 void host_tensor_store::clear() {
@@ -142,6 +153,10 @@ bool upload_tensors_from_host(ggml_context * ctx,
         }
         if (!it->second) {
             error = "Cannot upload to null tensor: " + copy.name;
+            return false;
+        }
+        if (!tensor_belongs_to_context(ctx, it->second)) {
+            error = "Cannot upload tensor from a different context: " + copy.name;
             return false;
         }
 
