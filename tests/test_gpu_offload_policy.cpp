@@ -31,6 +31,11 @@ int main() {
     if (expect_policy("15", false, true, 15, "enabled") != 0) return 1;
     if (expect_policy("-2", false, false, 0, "invalid") != 0) return 1;
     if (expect_policy("abc", false, false, 0, "invalid") != 0) return 1;
+    if (expect_policy(" 15", false, false, 0, "invalid") != 0) return 1;
+    if (expect_policy("+15", false, false, 0, "invalid") != 0) return 1;
+    if (expect_policy("15s", false, false, 0, "invalid") != 0) return 1;
+    if (expect_policy("2147483648", false, false, 0, "invalid") != 0) return 1;
+    if (expect_policy("999999999999999999999999999999", false, false, 0, "invalid") != 0) return 1;
     if (expect_policy("15", true, false, 0, "QWEN3_TTS_LOW_MEM") != 0) return 1;
     std::printf("gpu_offload_policy tests passed\n");
     return 0;

@@ -1,8 +1,6 @@
 #include "common/gpu_offload_policy.h"
 
-#include <cerrno>
 #include <climits>
-#include <cstdlib>
 
 namespace qwen3_tts {
 
@@ -17,20 +15,28 @@ gpu_offload_policy parse_gpu_offload_policy(const char * idle_env, bool low_mem_
         return out;
     }
 
-    errno = 0;
-    char * end = nullptr;
-    long parsed = std::strtol(idle_env, &end, 10);
-    if (errno != 0 || end == idle_env || *end != '\0' || parsed < 0 || parsed > INT_MAX) {
-        out.reason = "invalid value, disabled";
-        return out;
+    int parsed = 0;
+    for (const char * p = idle_env; *p != '\0'; ++p) {
+        if (*p < '0' || *p > '9') {
+            out.reason = "invalid value, disabled";
+            return out;
+        }
+
+        const int digit = *p - '0';
+        if (parsed > (INT_MAX - digit) / 10) {
+            out.reason = "invalid value, disabled";
+            return out;
+        }
+        parsed = parsed * 10 + digit;
     }
+
     if (parsed == 0) {
         out.reason = "disabled";
         return out;
     }
 
     out.enabled = true;
-    out.idle_secs = (int) parsed;
+    out.idle_secs = parsed;
     out.reason = "enabled";
     return out;
 }
