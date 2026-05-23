@@ -3,8 +3,6 @@
 // Usage: qwen3-tts-quantize --input <path> --output <path> --type <q8_0|q4_k|q4_0|q5_0|q5_1>
 //        [--exclude <pattern>]  (keep matching tensors at original precision)
 
-#include "common/gguf_loader.h"
-
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "gguf.h"

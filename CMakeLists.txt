@@ -34,6 +34,18 @@ find_package(Threads REQUIRED)
 # GGML library paths
 set(GGML_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ggml")
 set(GGML_BUILD_DIR "${GGML_DIR}/build")
+set(GGML_LINK_DIRS
+    ${GGML_BUILD_DIR}/src
+    ${GGML_BUILD_DIR}/src/$<CONFIG>
+    ${GGML_BUILD_DIR}/src/ggml-cpu
+    ${GGML_BUILD_DIR}/src/ggml-cpu/$<CONFIG>
+    ${GGML_BUILD_DIR}/bin
+    ${GGML_BUILD_DIR}/bin/$<CONFIG>
+)
+set(GGML_METAL_LINK_DIRS
+    ${GGML_BUILD_DIR}/src/ggml-metal
+    ${GGML_BUILD_DIR}/src/ggml-metal/$<CONFIG>
+)
 
 # Detect Metal backend availability
 if(APPLE AND EXISTS "${GGML_BUILD_DIR}/src/ggml-metal/libggml-metal.dylib")
@@ -58,8 +70,8 @@ target_include_directories(qwen3_tts_common PUBLIC
     ${GGML_DIR}/include
 )
 target_link_directories(qwen3_tts_common PUBLIC
-    ${GGML_BUILD_DIR}/src
-    ${GGML_BUILD_DIR}/src/ggml-metal
+    ${GGML_LINK_DIRS}
+    ${GGML_METAL_LINK_DIRS}
 )
 target_link_libraries(qwen3_tts_common PUBLIC
     ggml
@@ -136,8 +148,22 @@ target_link_libraries(qwen3-tts-cli PRIVATE
 add_executable(qwen3-tts-quantize
     src/qwen3_tts_quantize.cpp
 )
+target_compile_features(qwen3-tts-quantize PRIVATE cxx_std_17)
+set_target_properties(qwen3-tts-quantize PROPERTIES
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(qwen3-tts-quantize PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${GGML_DIR}/include
+)
+target_link_directories(qwen3-tts-quantize PRIVATE
+    ${GGML_LINK_DIRS}
+)
 target_link_libraries(qwen3-tts-quantize PRIVATE
-    qwen3_tts_common
+    ggml
+    ggml-base
+    ggml-cpu
+    Threads::Threads
 )
 
 # Test executable for tokenizer

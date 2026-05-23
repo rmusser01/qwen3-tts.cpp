@@ -25,7 +25,7 @@ Runs the full TTS pipeline in pure C++17, including text tokenization, speaker e
 
 ## Prerequisites
 
-- **Compiler:** GCC 9+ or Clang 10+ (Linux/macOS), or MSVC 2019+ (Windows)
+- **Compiler:** C++17-capable GCC 9+ or Clang 10+ (Linux/macOS), or MSVC 2019+ (Windows)
 - **CMake:** 3.14+
 - **GGML:** Built from source (vendored as git submodule)
 - **GPU backends (optional):**
@@ -408,6 +408,18 @@ Quantize models from F16 to smaller formats without Python:
 ```
 
 Supported types: `q8_0`, `q4_0`, `q4_1`, `q5_0`, `q5_1`, `q4_k`, `q5_k`, `q6_k`. The CLI auto-detects Q8_0 models when present.
+
+The quantizer is built as a C++17 target by default; no C++20 compiler mode is required. To build only the quantizer after building GGML:
+
+```bash
+cmake --build build --target qwen3-tts-quantize -j4
+```
+
+On Windows, run this from a Developer Command Prompt:
+
+```cmd
+cmake --build build --target qwen3-tts-quantize --config Release
+```
 
 ### Backend Selection
 
