@@ -313,6 +313,53 @@ static int run_upload_rejects_duplicate_store_name() {
     return 0;
 }
 
+static int run_upload_rejects_subset_destination_map() {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    if (!backend) return fail("backend init failed");
+
+    ggml_init_params params = {
+        /*.mem_size   =*/ ggml_tensor_overhead() * 3,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        ggml_backend_free(backend);
+        return fail("ggml_init failed");
+    }
+
+    ggml_tensor * t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+    ggml_set_name(t, "test.weight");
+    ggml_tensor * extra = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+    ggml_set_name(extra, "extra.weight");
+
+    std::map<std::string, ggml_tensor *> tensors;
+    tensors["test.weight"] = t;
+
+    qwen3_tts::host_tensor_store store;
+    qwen3_tts::host_tensor_copy copy;
+    copy.name = "test.weight";
+    copy.bytes.resize(4 * sizeof(float));
+    store.total_bytes = copy.bytes.size();
+    store.tensors.push_back(copy);
+
+    ggml_backend_buffer_t buffer = nullptr;
+    std::string error;
+    const bool ok = qwen3_tts::upload_tensors_from_host(ctx, tensors, backend, store, buffer, error);
+    const bool buffer_changed = buffer != nullptr;
+
+    if (buffer) ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+
+    if (ok) return fail("upload accepted subset destination map");
+    if (error.find("context") == std::string::npos && error.find("destination") == std::string::npos) {
+        return fail("subset destination map error mismatch");
+    }
+    if (buffer_changed) return fail("subset destination map failure changed buffer");
+    return 0;
+}
+
 static int run_backend_roundtrip(enum ggml_backend_dev_type type, bool optional) {
     ggml_backend_t backend = ggml_backend_init_by_type(type, nullptr);
     if (!backend) {
@@ -373,6 +420,7 @@ int main() {
     if (run_upload_rejects_wrong_context_tensor() != 0) return 1;
     if (run_upload_rejects_incomplete_store() != 0) return 1;
     if (run_upload_rejects_duplicate_store_name() != 0) return 1;
+    if (run_upload_rejects_subset_destination_map() != 0) return 1;
     if (run_backend_roundtrip(GGML_BACKEND_DEVICE_TYPE_CPU, false) != 0) return 1;
     if (run_backend_roundtrip(GGML_BACKEND_DEVICE_TYPE_GPU, true) != 0) return 1;
     std::printf("weight_residency tests passed\n");

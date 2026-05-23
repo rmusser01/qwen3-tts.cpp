@@ -163,6 +163,23 @@ bool upload_tensors_from_host(ggml_context * ctx,
         return false;
     }
 
+    for (ggml_tensor * tensor = ggml_get_first_tensor(ctx);
+         tensor;
+         tensor = ggml_get_next_tensor(ctx, tensor)) {
+        bool found = false;
+        for (const auto & entry : tensors) {
+            if (entry.second == tensor) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            error = "Destination tensor map does not cover context tensor: "
+                + std::string(tensor->name);
+            return false;
+        }
+    }
+
     for (const auto & entry : tensors) {
         auto copy_it = store_by_name.find(entry.first);
         if (copy_it == store_by_name.end()) {
