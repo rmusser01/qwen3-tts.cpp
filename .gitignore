@@ -54,3 +54,5 @@ Thumbs.db
 debug_*.bin
 reference/decoder_debug/
 reference/debug/
+/build-pr-cuda86
+/build-pr-default-cuda
