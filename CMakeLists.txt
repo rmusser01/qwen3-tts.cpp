@@ -292,4 +292,5 @@ add_test(NAME gpu_idle_offload_validation_test
 )
 set_tests_properties(gpu_idle_offload_validation_test PROPERTIES
     LABELS "manual;gpu"
+    SKIP_REGULAR_EXPRESSION "SKIP:"
 )

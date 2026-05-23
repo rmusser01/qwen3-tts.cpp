@@ -125,12 +125,24 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(idle_secs * 1000 + 750));
-    if (!qwen3_tts::Qwen3TTSDiagnostics::transformer_ram_offloaded(tts)) {
+    bool transformer_offloaded = false;
+    bool decoder_offloaded = false;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(idle_secs + 5);
+    do {
+        transformer_offloaded = qwen3_tts::Qwen3TTSDiagnostics::transformer_ram_offloaded(tts);
+        decoder_offloaded = qwen3_tts::Qwen3TTSDiagnostics::decoder_ram_offloaded(tts);
+        if (transformer_offloaded && decoder_offloaded) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    if (!transformer_offloaded) {
         std::fprintf(stderr, "FAIL: transformer did not RAM-offload after idle timeout; verify CUDA/Vulkan was selected\n");
         return 1;
     }
-    if (!qwen3_tts::Qwen3TTSDiagnostics::decoder_ram_offloaded(tts)) {
+    if (!decoder_offloaded) {
         std::fprintf(stderr, "FAIL: decoder did not RAM-offload after idle timeout; verify CUDA/Vulkan was selected\n");
         return 1;
     }

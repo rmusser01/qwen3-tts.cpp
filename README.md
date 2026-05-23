@@ -435,6 +435,7 @@ For CUDA:
 
 ```bash
 cmake -S ggml -B ggml/build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build ggml/build -j
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target test_gpu_idle_offload_validation -j
 QWEN3_TTS_RUN_GPU_OFFLOAD_VALIDATION=1 \
@@ -447,6 +448,7 @@ For Vulkan, build GGML with Vulkan and leave backend selection on `auto` unless 
 
 ```bash
 cmake -S ggml -B ggml/build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build ggml/build -j
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target test_gpu_idle_offload_validation -j
 QWEN3_TTS_RUN_GPU_OFFLOAD_VALIDATION=1 \
@@ -457,6 +459,7 @@ ctest --test-dir build -R gpu_idle_offload_validation --output-on-failure
 Expected validation signs:
 
 - Logs show CUDA or Vulkan backends for `TTSTransformer` and `AudioTokenizerDecoder`.
+- For Vulkan validation, those backend logs must specifically show Vulkan. If `auto` selects another GPU backend, disable that backend in the GGML build or rebuild with only Vulkan enabled for this check.
 - Logs show `GPU idle RAM offload: transformer copied ... to host RAM` and `GPU idle RAM offload: decoder copied ... to host RAM`.
 - GPU memory rises during load/synthesis, drops after the idle timeout, and rises again for the second synthesis. Use `nvidia-smi`, `nvtop`, `radeontop`, vendor tooling, or Vulkan memory tooling as appropriate.
 - The validation test exits successfully after the post-offload synthesis.
@@ -465,10 +468,11 @@ Negative checks:
 
 ```bash
 QWEN3_TTS_LOW_MEM=1 QWEN3_TTS_GPU_OFFLOAD_IDLE_SECS=2 ./build/qwen3-tts-cli -m models -t "low memory check" -o /tmp/qwen-lowmem.wav
-QWEN3_TTS_RUN_GPU_OFFLOAD_VALIDATION=1 QWEN3_TTS_BACKEND=cpu ctest --test-dir build -R gpu_idle_offload_validation --output-on-failure
+QWEN3_TTS_BACKEND=cpu QWEN3_TTS_GPU_OFFLOAD_IDLE_SECS=1 ./build/test_pipeline_offload_lifecycle
+QWEN3_TTS_RUN_GPU_OFFLOAD_VALIDATION=1 QWEN3_TTS_BACKEND=cpu ./build/test_gpu_idle_offload_validation
 ```
 
-Low-memory mode should log that idle GPU RAM offload is disabled and keep the existing staged load/unload behavior. CPU and Metal paths should not production-offload weights to RAM.
+Low-memory mode should log that idle GPU RAM offload is disabled and keep the existing staged load/unload behavior. The CPU lifecycle check should pass without production-offloading weights. The final GPU validation guard should exit non-zero with `QWEN3_TTS_BACKEND=cpu cannot validate CUDA/Vulkan idle offload`; that confirms the CUDA/Vulkan validation gate is not being satisfied by a CPU run. Metal paths should log as ineligible/disabled for idle GPU RAM offload.
 
 ### Runtime environment variables
 
