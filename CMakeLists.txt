@@ -210,6 +210,17 @@ target_link_libraries(test_decoder PRIVATE
     Threads::Threads
 )
 
+add_executable(test_pipeline_offload_lifecycle
+    tests/test_pipeline_offload_lifecycle.cpp
+)
+target_link_libraries(test_pipeline_offload_lifecycle PRIVATE
+    qwen3_tts
+    Threads::Threads
+)
+target_compile_definitions(test_pipeline_offload_lifecycle PRIVATE
+    QWEN3_TTS_ENABLE_TEST_DIAGNOSTICS
+)
+
 # Install targets
 install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_codec_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli
     ARCHIVE DESTINATION lib
@@ -258,5 +269,9 @@ add_test(NAME transformer_test
 )
 add_test(NAME decoder_test
     COMMAND test_decoder
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME pipeline_offload_lifecycle_test
+    COMMAND test_pipeline_offload_lifecycle
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
