@@ -156,7 +156,14 @@ bool upload_tensors_from_host(ggml_context * ctx,
     }
 
     std::map<std::string, const host_tensor_copy *> store_by_name;
+    size_t store_total_bytes = 0;
     for (const host_tensor_copy & copy : store.tensors) {
+        if (copy.bytes.size() > std::numeric_limits<size_t>::max() - store_total_bytes) {
+            error = "Host tensor store total byte count overflow";
+            return false;
+        }
+        store_total_bytes += copy.bytes.size();
+
         if (store_by_name.find(copy.name) != store_by_name.end()) {
             error = "Cannot upload duplicate tensor copy: " + copy.name;
             return false;
@@ -166,6 +173,11 @@ bool upload_tensors_from_host(ggml_context * ctx,
             return false;
         }
         store_by_name[copy.name] = &copy;
+    }
+
+    if (store_total_bytes != store.total_bytes) {
+        error = "Host tensor store total bytes mismatch";
+        return false;
     }
 
     if (store.tensors.size() != tensors.size()) {
