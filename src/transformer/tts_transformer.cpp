@@ -291,6 +291,14 @@ size_t TTSTransformer::ram_offloaded_bytes() const {
     return model_.host_weights.total_bytes;
 }
 
+bool TTSTransformer::require_weights_gpu_resident() {
+    if (model_.residency == weight_residency::RamResident) {
+        error_msg_ = "Transformer weights are RAM-offloaded; reload_weights_from_ram() first";
+        return false;
+    }
+    return true;
+}
+
 bool TTSTransformer::try_init_coreml_code_predictor(const std::string & model_path) {
     use_coreml_code_predictor_ = false;
     coreml_code_predictor_path_.clear();
@@ -902,6 +910,10 @@ bool TTSTransformer::load_tensor_data(const std::string & path, struct gguf_cont
 }
 
 bool TTSTransformer::init_kv_cache(int32_t n_ctx) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     const auto & cfg = model_.config;
     
     free_tts_kv_cache(state_.cache);
@@ -956,6 +968,10 @@ void TTSTransformer::clear_kv_cache() {
 }
 
 bool TTSTransformer::init_code_pred_kv_cache(int32_t n_ctx) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     const auto & cfg = model_.config;
     
     free_tts_kv_cache(state_.code_pred_cache);
@@ -1134,6 +1150,10 @@ bool TTSTransformer::lookup_single_embedding_row(struct ggml_tensor * embedding,
 }
 
 bool TTSTransformer::get_codec_embedding_row(int32_t token_id, std::vector<float> & out) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!model_.codec_embd) {
         error_msg_ = "codec_embd tensor not loaded";
         return false;
@@ -2217,6 +2237,10 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, 
 bool TTSTransformer::forward_prefill(const float * prefill_embd, int32_t n_tokens,
                                      int32_t n_past, std::vector<float> & output,
                                      std::vector<float> * logits_out) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -2349,6 +2373,10 @@ bool TTSTransformer::forward_prefill(const float * prefill_embd, int32_t n_token
 bool TTSTransformer::forward_text(const int32_t * text_tokens, int32_t n_tokens,
                                   const float * speaker_embd, int32_t n_past,
                                   std::vector<float> & output) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!text_tokens) {
         error_msg_ = "text_tokens is null";
         return false;
@@ -2379,6 +2407,10 @@ bool TTSTransformer::forward_text(const int32_t * text_tokens, int32_t n_tokens,
 bool TTSTransformer::forward_step(const float * step_embd, int32_t n_past,
                                   std::vector<float> & output,
                                   std::vector<float> * hidden_out) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -2495,6 +2527,10 @@ bool TTSTransformer::forward_step(const float * step_embd, int32_t n_past,
 
 bool TTSTransformer::forward_codec(int32_t codec_token, int32_t n_past,
                                    std::vector<float> & output) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     std::vector<float> codec_row;
     if (!lookup_embedding_rows(model_.codec_embd, &codec_token, 1,
                                "inp_legacy_codec_token", "legacy_codec_row",
@@ -2515,6 +2551,10 @@ bool TTSTransformer::get_hidden_states(std::vector<float> & hidden) const {
 
 bool TTSTransformer::predict_codes(const float * hidden, const int32_t * prev_codes,
                                     std::vector<float> & output) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -2696,6 +2736,10 @@ bool TTSTransformer::predict_codes_autoregressive_coreml(const float * hidden,
 bool TTSTransformer::predict_codes_autoregressive(const float * hidden, int32_t codebook_0_token,
                                                    std::vector<int32_t> & output,
                                                    float temperature, int32_t top_k) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -2971,6 +3015,10 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
                                int32_t n_ref_text_tokens,
                                const int32_t * ref_codes,
                                int32_t n_ref_frames) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
 #ifdef QWEN3_TTS_TIMING
     using clk = std::chrono::high_resolution_clock;
     tts_timing timing = {};

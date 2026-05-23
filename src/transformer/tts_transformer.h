@@ -336,6 +336,8 @@ public:
                             std::vector<float> & output);
     
 private:
+    bool require_weights_gpu_resident();
+
     bool try_init_coreml_code_predictor(const std::string & model_path);
     bool predict_codes_autoregressive_coreml(const float * hidden, int32_t codebook_0_token,
                                              std::vector<int32_t> & output,

@@ -193,8 +193,20 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "  FAIL: transformer did not enter RAM-resident state\n");
             return 1;
         }
+        if (transformer.ram_offloaded_bytes() == 0) {
+            fprintf(stderr, "  FAIL: transformer did not retain RAM-resident weights\n");
+            return 1;
+        }
+        if (transformer.init_kv_cache(16)) {
+            fprintf(stderr, "  FAIL: transformer allowed KV cache init while RAM-resident\n");
+            return 1;
+        }
         if (!transformer.reload_weights_from_ram(offload_error)) {
             fprintf(stderr, "  FAIL: transformer reload failed: %s\n", offload_error.c_str());
+            return 1;
+        }
+        if (transformer.ram_offloaded_bytes() != 0) {
+            fprintf(stderr, "  FAIL: transformer retained RAM-resident weights after reload\n");
             return 1;
         }
     }
