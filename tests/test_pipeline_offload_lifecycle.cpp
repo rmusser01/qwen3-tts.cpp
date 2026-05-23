@@ -35,7 +35,8 @@ int main() {
     }
 
     qwen3_tts::tts_params params;
-    params.max_audio_tokens = 1;
+    // Keep this short, but above the vocoder's reflect-padding minimum.
+    params.max_audio_tokens = 8;
     auto result = tts.synthesize("test", params);
     if (!result.success) {
         std::fprintf(stderr, "FAIL: synthesize failed: %s\n", result.error_msg.c_str());
