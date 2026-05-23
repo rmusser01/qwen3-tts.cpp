@@ -26,6 +26,7 @@ class Qwen3TTSDiagnostics {
 public:
     static bool force_transformer_offload(Qwen3TTS & tts, std::string & error);
     static bool transformer_ram_offloaded(const Qwen3TTS & tts);
+    static bool decoder_ram_offloaded(const Qwen3TTS & tts);
     static bool force_idle_offload_once(Qwen3TTS & tts, std::string & error);
 };
 #endif
@@ -239,6 +240,7 @@ private:
     bool offload_idle_components_locked(bool force_for_test = false, std::string * error = nullptr);
     bool force_transformer_offload_for_test(std::string & error);
     bool transformer_ram_offloaded_for_test() const;
+    bool decoder_ram_offloaded_for_test() const;
     bool force_idle_offload_once_for_test(std::string & error);
     void publish_metadata_snapshot_locked(std::shared_ptr<const model_metadata_snapshot> snapshot);
     const model_metadata_snapshot & metadata_snapshot_locked() const;
@@ -282,6 +284,10 @@ inline bool Qwen3TTSDiagnostics::force_transformer_offload(Qwen3TTS & tts, std::
 
 inline bool Qwen3TTSDiagnostics::transformer_ram_offloaded(const Qwen3TTS & tts) {
     return tts.transformer_ram_offloaded_for_test();
+}
+
+inline bool Qwen3TTSDiagnostics::decoder_ram_offloaded(const Qwen3TTS & tts) {
+    return tts.decoder_ram_offloaded_for_test();
 }
 
 inline bool Qwen3TTSDiagnostics::force_idle_offload_once(Qwen3TTS & tts, std::string & error) {

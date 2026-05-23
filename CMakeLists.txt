@@ -221,6 +221,17 @@ target_compile_definitions(test_pipeline_offload_lifecycle PRIVATE
     QWEN3_TTS_ENABLE_TEST_DIAGNOSTICS
 )
 
+add_executable(test_gpu_idle_offload_validation
+    tests/test_gpu_idle_offload_validation.cpp
+)
+target_link_libraries(test_gpu_idle_offload_validation PRIVATE
+    qwen3_tts
+    Threads::Threads
+)
+target_compile_definitions(test_gpu_idle_offload_validation PRIVATE
+    QWEN3_TTS_ENABLE_TEST_DIAGNOSTICS
+)
+
 # Install targets
 install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_codec_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli
     ARCHIVE DESTINATION lib
@@ -274,4 +285,11 @@ add_test(NAME decoder_test
 add_test(NAME pipeline_offload_lifecycle_test
     COMMAND test_pipeline_offload_lifecycle
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME gpu_idle_offload_validation_test
+    COMMAND test_gpu_idle_offload_validation
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(gpu_idle_offload_validation_test PROPERTIES
+    LABELS "manual;gpu"
 )

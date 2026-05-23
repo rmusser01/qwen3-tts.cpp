@@ -346,6 +346,11 @@ bool Qwen3TTS::transformer_ram_offloaded_for_test() const {
     return transformer_.is_ram_offloaded();
 }
 
+bool Qwen3TTS::decoder_ram_offloaded_for_test() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return audio_decoder_.is_ram_offloaded();
+}
+
 bool Qwen3TTS::force_idle_offload_once_for_test(std::string & error) {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     if (active_operations_ != 0) {

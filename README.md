@@ -427,6 +427,49 @@ There is no separate `metal` or `vulkan` value — those are reached via `auto`.
 
 Idle GPU RAM offload is intended for long-lived CUDA/Vulkan processes that want to release VRAM between requests. It copies weights to host RAM after the idle timeout fires, frees GPU weight buffers, and reloads from RAM on the next tensor-using request. It does not stream layers during inference and is disabled for Metal/CPU backends.
 
+#### Validating idle GPU RAM offload
+
+Use the opt-in validation test on a machine with the GGUF models and a CUDA or Vulkan GGML build. The test keeps a `Qwen3TTS` instance alive across two synthesis requests, waits for the production idle worker, requires transformer and decoder weights to move to RAM, then verifies the next synthesis reloads them successfully.
+
+For CUDA:
+
+```bash
+cmake -S ggml -B ggml/build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target test_gpu_idle_offload_validation -j
+QWEN3_TTS_RUN_GPU_OFFLOAD_VALIDATION=1 \
+QWEN3_TTS_BACKEND=cuda \
+QWEN3_TTS_MODEL_DIR=models \
+ctest --test-dir build -R gpu_idle_offload_validation --output-on-failure
+```
+
+For Vulkan, build GGML with Vulkan and leave backend selection on `auto` unless your local build has a custom selector:
+
+```bash
+cmake -S ggml -B ggml/build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target test_gpu_idle_offload_validation -j
+QWEN3_TTS_RUN_GPU_OFFLOAD_VALIDATION=1 \
+QWEN3_TTS_MODEL_DIR=models \
+ctest --test-dir build -R gpu_idle_offload_validation --output-on-failure
+```
+
+Expected validation signs:
+
+- Logs show CUDA or Vulkan backends for `TTSTransformer` and `AudioTokenizerDecoder`.
+- Logs show `GPU idle RAM offload: transformer copied ... to host RAM` and `GPU idle RAM offload: decoder copied ... to host RAM`.
+- GPU memory rises during load/synthesis, drops after the idle timeout, and rises again for the second synthesis. Use `nvidia-smi`, `nvtop`, `radeontop`, vendor tooling, or Vulkan memory tooling as appropriate.
+- The validation test exits successfully after the post-offload synthesis.
+
+Negative checks:
+
+```bash
+QWEN3_TTS_LOW_MEM=1 QWEN3_TTS_GPU_OFFLOAD_IDLE_SECS=2 ./build/qwen3-tts-cli -m models -t "low memory check" -o /tmp/qwen-lowmem.wav
+QWEN3_TTS_RUN_GPU_OFFLOAD_VALIDATION=1 QWEN3_TTS_BACKEND=cpu ctest --test-dir build -R gpu_idle_offload_validation --output-on-failure
+```
+
+Low-memory mode should log that idle GPU RAM offload is disabled and keep the existing staged load/unload behavior. CPU and Metal paths should not production-offload weights to RAM.
+
 ### Runtime environment variables
 
 | Variable | Default | Purpose |
