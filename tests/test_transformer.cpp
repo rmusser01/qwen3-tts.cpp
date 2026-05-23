@@ -179,6 +179,25 @@ int main(int argc, char ** argv) {
            config.hidden_size, config.n_layers, config.n_attention_heads, config.n_key_value_heads);
     printf("  Codec: vocab_size=%d, n_codebooks=%d\n", config.codec_vocab_size, config.n_codebooks);
     printf("  Code predictor: layers=%d, vocab_size=%d\n", config.code_pred_layers, config.code_pred_vocab_size);
+    if (transformer.is_ram_offloaded()) {
+        fprintf(stderr, "  FAIL: transformer should not start RAM-offloaded\n");
+        return 1;
+    }
+    if (transformer.can_offload_to_ram()) {
+        std::string offload_error;
+        if (!transformer.offload_weights_to_ram(offload_error)) {
+            fprintf(stderr, "  FAIL: transformer offload failed: %s\n", offload_error.c_str());
+            return 1;
+        }
+        if (!transformer.is_ram_offloaded()) {
+            fprintf(stderr, "  FAIL: transformer did not enter RAM-resident state\n");
+            return 1;
+        }
+        if (!transformer.reload_weights_from_ram(offload_error)) {
+            fprintf(stderr, "  FAIL: transformer reload failed: %s\n", offload_error.c_str());
+            return 1;
+        }
+    }
     test_pass("Model loaded successfully");
 
     // -----------------------------------------------------------------------

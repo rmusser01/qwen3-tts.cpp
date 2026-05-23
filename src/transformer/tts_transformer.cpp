@@ -15,6 +15,40 @@
 
 namespace qwen3_tts {
 
+namespace {
+
+bool create_transformer_scheduler(tts_transformer_state & state, std::string & error) {
+    std::vector<ggml_backend_t> backends;
+    backends.push_back(state.backend);
+    if (state.backend_cpu) {
+        backends.push_back(state.backend_cpu);
+    }
+
+    state.sched = ggml_backend_sched_new(backends.data(), nullptr, (int) backends.size(),
+                                         QWEN3_TTS_MAX_NODES, false, true);
+    if (!state.sched) {
+        error = "Failed to create backend scheduler";
+        return false;
+    }
+    return true;
+}
+
+void clear_context_tensor_allocations(ggml_context * ctx) {
+    if (!ctx) {
+        return;
+    }
+
+    for (ggml_tensor * tensor = ggml_get_first_tensor(ctx);
+         tensor;
+         tensor = ggml_get_next_tensor(ctx, tensor)) {
+        tensor->buffer = nullptr;
+        tensor->data = nullptr;
+        tensor->extra = nullptr;
+    }
+}
+
+} // namespace
+
 TTSTransformer::TTSTransformer() = default;
 
 TTSTransformer::~TTSTransformer() {
@@ -136,14 +170,7 @@ bool TTSTransformer::load_model(const std::string & model_path) {
         }
     }
     
-    std::vector<ggml_backend_t> backends;
-    backends.push_back(state_.backend);
-    if (state_.backend_cpu) {
-        backends.push_back(state_.backend_cpu);
-    }
-    state_.sched = ggml_backend_sched_new(backends.data(), nullptr, (int)backends.size(), QWEN3_TTS_MAX_NODES, false, true);
-    if (!state_.sched) {
-        error_msg_ = "Failed to create backend scheduler";
+    if (!create_transformer_scheduler(state_, error_msg_)) {
         return false;
     }
     
@@ -154,6 +181,114 @@ bool TTSTransformer::load_model(const std::string & model_path) {
     }
     
     return true;
+}
+
+bool TTSTransformer::can_offload_to_ram() const {
+    return model_.residency == weight_residency::GpuResident &&
+           model_.buffer != nullptr &&
+           backend_is_cuda_or_vulkan(state_.backend);
+}
+
+bool TTSTransformer::offload_weights_to_ram(std::string & error) {
+    error.clear();
+
+    if (model_.residency == weight_residency::RamResident) {
+        return true;
+    }
+    if (model_.residency != weight_residency::GpuResident) {
+        error = "Cannot offload transformer weights: model weights are not GPU-resident";
+        return false;
+    }
+    if (!model_.buffer) {
+        error = "Cannot offload transformer weights: model buffer is null";
+        return false;
+    }
+    if (!can_offload_to_ram()) {
+        error = "Cannot offload transformer weights: backend does not support RAM offload";
+        return false;
+    }
+
+    free_tts_kv_cache(state_.cache);
+    free_tts_kv_cache(state_.code_pred_cache);
+    if (state_.sched) {
+        ggml_backend_sched_reset(state_.sched);
+    }
+
+    if (!download_tensors_to_host(model_.tensors, model_.host_weights, error)) {
+        model_.host_weights.clear();
+        model_.residency = weight_residency::GpuResident;
+        return false;
+    }
+
+    if (state_.sched) {
+        ggml_backend_sched_free(state_.sched);
+        state_.sched = nullptr;
+    }
+    ggml_backend_buffer_free(model_.buffer);
+    model_.buffer = nullptr;
+    clear_context_tensor_allocations(model_.ctx);
+    model_.residency = weight_residency::RamResident;
+    last_hidden_.clear();
+    embd_row_fp16_scratch_.clear();
+    return true;
+}
+
+bool TTSTransformer::reload_weights_from_ram(std::string & error) {
+    error.clear();
+
+    if (model_.residency == weight_residency::GpuResident) {
+        return true;
+    }
+    if (model_.residency != weight_residency::RamResident) {
+        error = "Cannot reload transformer weights: model weights are not RAM-resident";
+        return false;
+    }
+    if (!model_.ctx) {
+        error = "Cannot reload transformer weights: ggml context is null";
+        return false;
+    }
+    if (!state_.backend) {
+        error = "Cannot reload transformer weights: backend is null";
+        return false;
+    }
+    if (model_.host_weights.tensors.empty() || model_.host_weights.total_bytes == 0) {
+        error = "Cannot reload transformer weights: host tensor store is empty";
+        return false;
+    }
+    if (model_.buffer) {
+        error = "Cannot reload transformer weights: model buffer must be null";
+        return false;
+    }
+
+    if (!upload_tensors_from_host(model_.ctx, model_.tensors, state_.backend,
+                                  model_.host_weights, model_.buffer, error)) {
+        model_.buffer = nullptr;
+        model_.residency = weight_residency::RamResident;
+        return false;
+    }
+
+    if (!state_.sched && !create_transformer_scheduler(state_, error)) {
+        ggml_backend_buffer_free(model_.buffer);
+        model_.buffer = nullptr;
+        clear_context_tensor_allocations(model_.ctx);
+        model_.residency = weight_residency::RamResident;
+        if (error.empty()) {
+            error = "Failed to recreate transformer scheduler after weight reload";
+        }
+        return false;
+    }
+
+    model_.host_weights.clear();
+    model_.residency = weight_residency::GpuResident;
+    return true;
+}
+
+bool TTSTransformer::is_ram_offloaded() const {
+    return model_.residency == weight_residency::RamResident;
+}
+
+size_t TTSTransformer::ram_offloaded_bytes() const {
+    return model_.host_weights.total_bytes;
 }
 
 bool TTSTransformer::try_init_coreml_code_predictor(const std::string & model_path) {
@@ -759,6 +894,9 @@ bool TTSTransformer::load_tensor_data(const std::string & path, struct gguf_cont
     
     fclose(f);
     release_preferred_backend(backend);
+
+    model_.host_weights.clear();
+    model_.residency = weight_residency::GpuResident;
     
     return true;
 }
@@ -3128,6 +3266,8 @@ void free_transformer_model(tts_transformer_model & model) {
         ggml_free(model.ctx);
         model.ctx = nullptr;
     }
+    model.host_weights.clear();
+    model.residency = weight_residency::Unloaded;
     model.tensors.clear();
     model.layers.clear();
     model.code_pred_layers.clear();

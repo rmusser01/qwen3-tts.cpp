@@ -4,6 +4,7 @@
 #include "ggml-backend.h"
 #include "gguf.h"
 #include "common/coreml_code_predictor.h"
+#include "common/weight_residency.h"
 
 #include <string>
 #include <map>
@@ -180,6 +181,9 @@ struct tts_transformer_model {
     
     // Tensor name to tensor mapping
     std::map<std::string, struct ggml_tensor *> tensors;
+
+    weight_residency residency = weight_residency::Unloaded;
+    host_tensor_store host_weights;
 };
 
 // KV cache for autoregressive generation
@@ -220,6 +224,12 @@ public:
 
     // Release all model/runtime resources
     void unload_model();
+
+    bool can_offload_to_ram() const;
+    bool offload_weights_to_ram(std::string & error);
+    bool reload_weights_from_ram(std::string & error);
+    bool is_ram_offloaded() const;
+    size_t ram_offloaded_bytes() const;
     
     // Initialize KV cache
     bool init_kv_cache(int32_t n_ctx);
