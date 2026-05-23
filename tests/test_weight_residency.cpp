@@ -4,10 +4,8 @@
 #include "ggml-backend.h"
 
 #include <cstdio>
-#include <cstring>
 #include <map>
 #include <string>
-#include <vector>
 
 static int fail(const char * msg) {
     std::fprintf(stderr, "FAIL: %s\n", msg);
@@ -31,6 +29,38 @@ static int run_download_rejects_null_tensor() {
     }
     if (!store.tensors.empty()) return fail("null tensor failure left tensor copies");
     if (store.total_bytes != 0) return fail("null tensor failure left total bytes");
+    return 0;
+}
+
+static int run_download_rejects_unallocated_tensor() {
+    ggml_init_params params = {
+        /*.mem_size   =*/ ggml_tensor_overhead() * 2,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) return fail("ggml_init failed");
+
+    ggml_tensor * t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+    ggml_set_name(t, "unallocated.weight");
+    std::map<std::string, ggml_tensor *> tensors;
+    tensors["unallocated.weight"] = t;
+
+    qwen3_tts::host_tensor_store store;
+    qwen3_tts::host_tensor_copy existing;
+    existing.name = "old.weight";
+    existing.bytes.push_back(42);
+    store.tensors.push_back(existing);
+    store.total_bytes = 1;
+
+    std::string error;
+    const bool ok = qwen3_tts::download_tensors_to_host(tensors, store, error);
+    ggml_free(ctx);
+
+    if (ok) return fail("download accepted unallocated tensor");
+    if (error.find("unallocated") == std::string::npos) return fail("unallocated tensor error mismatch");
+    if (!store.tensors.empty()) return fail("unallocated tensor failure left tensor copies");
+    if (store.total_bytes != 0) return fail("unallocated tensor failure left total bytes");
     return 0;
 }
 
@@ -195,6 +225,7 @@ static int run_backend_roundtrip(enum ggml_backend_dev_type type, bool optional)
 
 int main() {
     if (run_download_rejects_null_tensor() != 0) return 1;
+    if (run_download_rejects_unallocated_tensor() != 0) return 1;
     if (run_upload_rejects_missing_destination() != 0) return 1;
     if (run_upload_rejects_non_null_buffer() != 0) return 1;
     if (run_backend_roundtrip(GGML_BACKEND_DEVICE_TYPE_CPU, false) != 0) return 1;

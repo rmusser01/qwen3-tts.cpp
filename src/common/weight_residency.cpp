@@ -87,6 +87,12 @@ bool download_tensors_to_host(const std::map<std::string, ggml_tensor *> & tenso
     for (const auto & entry : tensors) {
         ggml_tensor * tensor = entry.second;
         const size_t nbytes = ggml_nbytes(tensor);
+        ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+        if (nbytes > 0 && (!buf || !tensor->data)) {
+            error = "Cannot download unallocated tensor: " + entry.first;
+            out.clear();
+            return false;
+        }
 
         host_tensor_copy copy;
         copy.name = entry.first;
