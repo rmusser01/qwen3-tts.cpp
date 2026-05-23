@@ -437,6 +437,55 @@ There is no separate `metal` or `vulkan` value — those are reached via `auto`.
 
 "Hybrid GPU + CPU" is the default behavior of any GPU build: the GGML scheduler keeps most work on the GPU and automatically falls back to CPU for ops the GPU backend does not support.
 
+Idle GPU RAM offload is intended for long-lived CUDA/Vulkan processes that want to release VRAM between requests. It copies weights to host RAM after the idle timeout fires, frees GPU weight buffers, and reloads from RAM on the next tensor-using request. It does not stream layers during inference and is disabled for Metal/CPU backends.
+
+#### Validating idle GPU RAM offload
+
+Use the opt-in validation test on a machine with the GGUF models and a CUDA or Vulkan GGML build. The test keeps a `Qwen3TTS` instance alive across two synthesis requests, waits for the production idle worker, requires transformer and decoder weights to move to RAM, then verifies the next synthesis reloads them successfully.
+
+For CUDA:
+
+```bash
+cmake -S ggml -B ggml/build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build ggml/build -j
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target test_gpu_idle_offload_validation -j
+QWEN3_TTS_RUN_GPU_OFFLOAD_VALIDATION=1 \
+QWEN3_TTS_BACKEND=cuda \
+QWEN3_TTS_MODEL_DIR=models \
+ctest --test-dir build -R gpu_idle_offload_validation --output-on-failure
+```
+
+For Vulkan, build GGML with Vulkan and leave backend selection on `auto` unless your local build has a custom selector:
+
+```bash
+cmake -S ggml -B ggml/build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build ggml/build -j
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target test_gpu_idle_offload_validation -j
+QWEN3_TTS_RUN_GPU_OFFLOAD_VALIDATION=1 \
+QWEN3_TTS_MODEL_DIR=models \
+ctest --test-dir build -R gpu_idle_offload_validation --output-on-failure
+```
+
+Expected validation signs:
+
+- Logs show CUDA or Vulkan backends for `TTSTransformer` and `AudioTokenizerDecoder`.
+- For Vulkan validation, those backend logs must specifically show Vulkan. If `auto` selects another GPU backend, disable that backend in the GGML build or rebuild with only Vulkan enabled for this check.
+- Logs show `GPU idle RAM offload: transformer copied ... to host RAM` and `GPU idle RAM offload: decoder copied ... to host RAM`.
+- GPU memory rises during load/synthesis, drops after the idle timeout, and rises again for the second synthesis. Use `nvidia-smi`, `nvtop`, `radeontop`, vendor tooling, or Vulkan memory tooling as appropriate.
+- The validation test exits successfully after the post-offload synthesis.
+
+Negative checks:
+
+```bash
+QWEN3_TTS_LOW_MEM=1 QWEN3_TTS_GPU_OFFLOAD_IDLE_SECS=2 ./build/qwen3-tts-cli -m models -t "low memory check" -o /tmp/qwen-lowmem.wav
+QWEN3_TTS_BACKEND=cpu QWEN3_TTS_GPU_OFFLOAD_IDLE_SECS=1 ./build/test_pipeline_offload_lifecycle
+QWEN3_TTS_RUN_GPU_OFFLOAD_VALIDATION=1 QWEN3_TTS_BACKEND=cpu ./build/test_gpu_idle_offload_validation
+```
+
+Low-memory mode should log that idle GPU RAM offload is disabled and keep the existing staged load/unload behavior. The CPU lifecycle check should pass without production-offloading weights. The final GPU validation guard should exit non-zero with `QWEN3_TTS_BACKEND=cpu cannot validate CUDA/Vulkan idle offload`; that confirms the CUDA/Vulkan validation gate is not being satisfied by a CPU run. Metal paths should log as ineligible/disabled for idle GPU RAM offload.
+
 ### Runtime environment variables
 
 | Variable | Default | Purpose |
@@ -446,6 +495,7 @@ There is no separate `metal` or `vulkan` value — those are reached via `auto`.
 | `QWEN3_TTS_DECODER_GPU_MAX_FRAMES` | `34` | Max frames per CUDA vocoder chunk. Lower it if the GPU OOMs during decode. |
 | `QWEN3_TTS_DECODER_GPU_CONTEXT_FRAMES` | `12` | Left-context frames per CUDA vocoder chunk. |
 | `QWEN3_TTS_LOW_MEM` | unset | Set to `1` to enable low-memory pipeline mode (loads/unloads components in sequence instead of holding everything resident). |
+| `QWEN3_TTS_GPU_OFFLOAD_IDLE_SECS` | `0` | CUDA/Vulkan only. Positive values enable idle RAM offload after N idle seconds. Disabled when `QWEN3_TTS_LOW_MEM=1`. |
 | `QWEN3_TTS_USE_COREML` | `1` on macOS when model exists | Set to `0` to disable the CoreML code-predictor bridge without rebuilding. |
 | `QWEN3_TTS_COREML_MODEL` | auto-detected | Absolute path override for a custom `.mlpackage` location (macOS only). |
 

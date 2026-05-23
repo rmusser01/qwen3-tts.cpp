@@ -4,6 +4,7 @@
 #include "ggml-backend.h"
 #include "gguf.h"
 #include "common/coreml_code_predictor.h"
+#include "common/weight_residency.h"
 
 #include <string>
 #include <map>
@@ -15,6 +16,8 @@
 #endif
 
 namespace qwen3_tts {
+
+class Qwen3TTS;
 
 #ifdef QWEN3_TTS_TIMING
 struct tts_timing {
@@ -180,6 +183,9 @@ struct tts_transformer_model {
     
     // Tensor name to tensor mapping
     std::map<std::string, struct ggml_tensor *> tensors;
+
+    weight_residency residency = weight_residency::Unloaded;
+    host_tensor_store host_weights;
 };
 
 // KV cache for autoregressive generation
@@ -220,6 +226,12 @@ public:
 
     // Release all model/runtime resources
     void unload_model();
+
+    bool can_offload_to_ram() const;
+    bool offload_weights_to_ram(std::string & error);
+    bool reload_weights_from_ram(std::string & error);
+    bool is_ram_offloaded() const;
+    size_t ram_offloaded_bytes() const;
     
     // Initialize KV cache
     bool init_kv_cache(int32_t n_ctx);
@@ -326,6 +338,11 @@ public:
                             std::vector<float> & output);
     
 private:
+    friend class Qwen3TTS;
+
+    bool offload_weights_to_ram(std::string & error, bool require_supported_backend);
+    bool require_weights_gpu_resident();
+
     bool try_init_coreml_code_predictor(const std::string & model_path);
     bool predict_codes_autoregressive_coreml(const float * hidden, int32_t codebook_0_token,
                                              std::vector<int32_t> & output,

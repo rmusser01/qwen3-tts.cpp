@@ -13,6 +13,7 @@ models/hf/
 
 # Claude Code runtime state
 .claude/
+.worktrees/
 
 # Reference outputs (generated)
 reference/*.bin
@@ -53,3 +54,5 @@ Thumbs.db
 debug_*.bin
 reference/decoder_debug/
 reference/debug/
+/build-pr-cuda86
+/build-pr-default-cuda

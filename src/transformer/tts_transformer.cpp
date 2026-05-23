@@ -15,6 +15,40 @@
 
 namespace qwen3_tts {
 
+namespace {
+
+bool create_transformer_scheduler(tts_transformer_state & state, std::string & error) {
+    std::vector<ggml_backend_t> backends;
+    backends.push_back(state.backend);
+    if (state.backend_cpu) {
+        backends.push_back(state.backend_cpu);
+    }
+
+    state.sched = ggml_backend_sched_new(backends.data(), nullptr, (int) backends.size(),
+                                         QWEN3_TTS_MAX_NODES, false, true);
+    if (!state.sched) {
+        error = "Failed to create backend scheduler";
+        return false;
+    }
+    return true;
+}
+
+void clear_context_tensor_allocations(ggml_context * ctx) {
+    if (!ctx) {
+        return;
+    }
+
+    for (ggml_tensor * tensor = ggml_get_first_tensor(ctx);
+         tensor;
+         tensor = ggml_get_next_tensor(ctx, tensor)) {
+        tensor->buffer = nullptr;
+        tensor->data = nullptr;
+        tensor->extra = nullptr;
+    }
+}
+
+} // namespace
+
 TTSTransformer::TTSTransformer() = default;
 
 TTSTransformer::~TTSTransformer() {
@@ -136,14 +170,7 @@ bool TTSTransformer::load_model(const std::string & model_path) {
         }
     }
     
-    std::vector<ggml_backend_t> backends;
-    backends.push_back(state_.backend);
-    if (state_.backend_cpu) {
-        backends.push_back(state_.backend_cpu);
-    }
-    state_.sched = ggml_backend_sched_new(backends.data(), nullptr, (int)backends.size(), QWEN3_TTS_MAX_NODES, false, true);
-    if (!state_.sched) {
-        error_msg_ = "Failed to create backend scheduler";
+    if (!create_transformer_scheduler(state_, error_msg_)) {
         return false;
     }
     
@@ -153,6 +180,126 @@ bool TTSTransformer::load_model(const std::string & model_path) {
         return false;
     }
     
+    return true;
+}
+
+bool TTSTransformer::can_offload_to_ram() const {
+    return model_.residency == weight_residency::GpuResident &&
+           model_.buffer != nullptr &&
+           backend_is_cuda_or_vulkan(state_.backend);
+}
+
+bool TTSTransformer::offload_weights_to_ram(std::string & error) {
+    return offload_weights_to_ram(error, true);
+}
+
+bool TTSTransformer::offload_weights_to_ram(std::string & error, bool require_supported_backend) {
+    error.clear();
+
+    if (model_.residency == weight_residency::RamResident) {
+        return true;
+    }
+    if (model_.residency != weight_residency::GpuResident) {
+        error = "Cannot offload transformer weights: model weights are not GPU-resident";
+        return false;
+    }
+    if (!model_.buffer) {
+        error = "Cannot offload transformer weights: model buffer is null";
+        return false;
+    }
+    if (require_supported_backend && !can_offload_to_ram()) {
+        error = "Cannot offload transformer weights: backend does not support RAM offload";
+        return false;
+    }
+
+    free_tts_kv_cache(state_.cache);
+    free_tts_kv_cache(state_.code_pred_cache);
+    if (state_.sched) {
+        ggml_backend_sched_reset(state_.sched);
+    }
+
+    if (!download_tensors_to_host(model_.tensors, model_.host_weights, error)) {
+        model_.host_weights.clear();
+        model_.residency = weight_residency::GpuResident;
+        return false;
+    }
+
+    if (state_.sched) {
+        ggml_backend_sched_free(state_.sched);
+        state_.sched = nullptr;
+    }
+    ggml_backend_buffer_free(model_.buffer);
+    model_.buffer = nullptr;
+    clear_context_tensor_allocations(model_.ctx);
+    model_.residency = weight_residency::RamResident;
+    last_hidden_.clear();
+    embd_row_fp16_scratch_.clear();
+    return true;
+}
+
+bool TTSTransformer::reload_weights_from_ram(std::string & error) {
+    error.clear();
+
+    if (model_.residency == weight_residency::GpuResident) {
+        return true;
+    }
+    if (model_.residency != weight_residency::RamResident) {
+        error = "Cannot reload transformer weights: model weights are not RAM-resident";
+        return false;
+    }
+    if (!model_.ctx) {
+        error = "Cannot reload transformer weights: ggml context is null";
+        return false;
+    }
+    if (!state_.backend) {
+        error = "Cannot reload transformer weights: backend is null";
+        return false;
+    }
+    if (model_.host_weights.tensors.empty() || model_.host_weights.total_bytes == 0) {
+        error = "Cannot reload transformer weights: host tensor store is empty";
+        return false;
+    }
+    if (model_.buffer) {
+        error = "Cannot reload transformer weights: model buffer must be null";
+        return false;
+    }
+
+    if (!upload_tensors_from_host(model_.ctx, model_.tensors, state_.backend,
+                                  model_.host_weights, model_.buffer, error)) {
+        model_.buffer = nullptr;
+        model_.residency = weight_residency::RamResident;
+        return false;
+    }
+
+    if (!state_.sched && !create_transformer_scheduler(state_, error)) {
+        ggml_backend_buffer_free(model_.buffer);
+        model_.buffer = nullptr;
+        clear_context_tensor_allocations(model_.ctx);
+        model_.residency = weight_residency::RamResident;
+        if (error.empty()) {
+            error = "Failed to recreate transformer scheduler after weight reload";
+        }
+        return false;
+    }
+
+    model_.host_weights.clear();
+    model_.residency = weight_residency::GpuResident;
+    return true;
+}
+
+bool TTSTransformer::is_ram_offloaded() const {
+    return model_.residency == weight_residency::RamResident;
+}
+
+size_t TTSTransformer::ram_offloaded_bytes() const {
+    return model_.host_weights.total_bytes;
+}
+
+bool TTSTransformer::require_weights_gpu_resident() {
+    if (model_.residency == weight_residency::RamResident) {
+        error_msg_ = "Transformer weights are RAM-offloaded; reload_weights_from_ram() first";
+        return false;
+    }
     return true;
 }
 
@@ -759,11 +906,18 @@ bool TTSTransformer::load_tensor_data(const std::string & path, struct gguf_cont
     
     fclose(f);
     release_preferred_backend(backend);
+
+    model_.host_weights.clear();
+    model_.residency = weight_residency::GpuResident;
     
     return true;
 }
 
 bool TTSTransformer::init_kv_cache(int32_t n_ctx) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     const auto & cfg = model_.config;
     
     free_tts_kv_cache(state_.cache);
@@ -818,6 +972,10 @@ void TTSTransformer::clear_kv_cache() {
 }
 
 bool TTSTransformer::init_code_pred_kv_cache(int32_t n_ctx) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     const auto & cfg = model_.config;
     
     free_tts_kv_cache(state_.code_pred_cache);
@@ -996,6 +1154,10 @@ bool TTSTransformer::lookup_single_embedding_row(struct ggml_tensor * embedding,
 }
 
 bool TTSTransformer::get_codec_embedding_row(int32_t token_id, std::vector<float> & out) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!model_.codec_embd) {
         error_msg_ = "codec_embd tensor not loaded";
         return false;
@@ -2079,6 +2241,10 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, 
 bool TTSTransformer::forward_prefill(const float * prefill_embd, int32_t n_tokens,
                                      int32_t n_past, std::vector<float> & output,
                                      std::vector<float> * logits_out) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -2211,6 +2377,10 @@ bool TTSTransformer::forward_prefill(const float * prefill_embd, int32_t n_token
 bool TTSTransformer::forward_text(const int32_t * text_tokens, int32_t n_tokens,
                                   const float * speaker_embd, int32_t n_past,
                                   std::vector<float> & output) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!text_tokens) {
         error_msg_ = "text_tokens is null";
         return false;
@@ -2241,6 +2411,10 @@ bool TTSTransformer::forward_text(const int32_t * text_tokens, int32_t n_tokens,
 bool TTSTransformer::forward_step(const float * step_embd, int32_t n_past,
                                   std::vector<float> & output,
                                   std::vector<float> * hidden_out) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -2357,6 +2531,10 @@ bool TTSTransformer::forward_step(const float * step_embd, int32_t n_past,
 
 bool TTSTransformer::forward_codec(int32_t codec_token, int32_t n_past,
                                    std::vector<float> & output) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     std::vector<float> codec_row;
     if (!lookup_embedding_rows(model_.codec_embd, &codec_token, 1,
                                "inp_legacy_codec_token", "legacy_codec_row",
@@ -2377,6 +2555,10 @@ bool TTSTransformer::get_hidden_states(std::vector<float> & hidden) const {
 
 bool TTSTransformer::predict_codes(const float * hidden, const int32_t * prev_codes,
                                     std::vector<float> & output) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -2558,6 +2740,10 @@ bool TTSTransformer::predict_codes_autoregressive_coreml(const float * hidden,
 bool TTSTransformer::predict_codes_autoregressive(const float * hidden, int32_t codebook_0_token,
                                                    std::vector<int32_t> & output,
                                                    float temperature, int32_t top_k) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -2833,6 +3019,10 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
                                int32_t n_ref_text_tokens,
                                const int32_t * ref_codes,
                                int32_t n_ref_frames) {
+    if (!require_weights_gpu_resident()) {
+        return false;
+    }
+
 #ifdef QWEN3_TTS_TIMING
     using clk = std::chrono::high_resolution_clock;
     tts_timing timing = {};
@@ -3128,6 +3318,8 @@ void free_transformer_model(tts_transformer_model & model) {
         ggml_free(model.ctx);
         model.ctx = nullptr;
     }
+    model.host_weights.clear();
+    model.residency = weight_residency::Unloaded;
     model.tensors.clear();
     model.layers.clear();
     model.code_pred_layers.clear();

@@ -56,7 +56,7 @@ else()
 endif()
 
 # Common library (gguf_loader + coreml bridge — compiled once, shared by all)
-set(COMMON_SOURCES src/common/gguf_loader.cpp src/common/speaker_embedding_io.cpp)
+set(COMMON_SOURCES src/common/gguf_loader.cpp src/common/speaker_embedding_io.cpp src/common/gpu_offload_policy.cpp src/common/weight_residency.cpp)
 if(APPLE AND QWEN3_TTS_COREML)
     list(APPEND COMMON_SOURCES src/common/coreml_code_predictor.mm)
     set_source_files_properties(src/common/coreml_code_predictor.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
@@ -175,11 +175,35 @@ target_link_libraries(test_tokenizer PRIVATE
     Threads::Threads
 )
 
+# Test executable for GPU offload policy
+add_executable(test_gpu_offload_policy
+    tests/test_gpu_offload_policy.cpp
+)
+target_link_libraries(test_gpu_offload_policy PRIVATE
+    qwen3_tts_common
+)
+
+# Test executable for weight residency helpers
+add_executable(test_weight_residency
+    tests/test_weight_residency.cpp
+)
+target_link_libraries(test_weight_residency PRIVATE
+    qwen3_tts_common
+)
+
 # Test executable for audio encoder
 add_executable(test_encoder
     tests/test_encoder.cpp
 )
 target_link_libraries(test_encoder PRIVATE
+    audio_tokenizer_encoder
+    Threads::Threads
+)
+
+add_executable(test_audio_tokenizer_encoder_lifecycle
+    tests/test_audio_tokenizer_encoder_lifecycle.cpp
+)
+target_link_libraries(test_audio_tokenizer_encoder_lifecycle PRIVATE
     audio_tokenizer_encoder
     Threads::Threads
 )
@@ -212,6 +236,28 @@ target_link_libraries(test_decoder PRIVATE
     Threads::Threads
 )
 
+add_executable(test_pipeline_offload_lifecycle
+    tests/test_pipeline_offload_lifecycle.cpp
+)
+target_link_libraries(test_pipeline_offload_lifecycle PRIVATE
+    qwen3_tts
+    Threads::Threads
+)
+target_compile_definitions(test_pipeline_offload_lifecycle PRIVATE
+    QWEN3_TTS_ENABLE_TEST_DIAGNOSTICS
+)
+
+add_executable(test_gpu_idle_offload_validation
+    tests/test_gpu_idle_offload_validation.cpp
+)
+target_link_libraries(test_gpu_idle_offload_validation PRIVATE
+    qwen3_tts
+    Threads::Threads
+)
+target_compile_definitions(test_gpu_idle_offload_validation PRIVATE
+    QWEN3_TTS_ENABLE_TEST_DIAGNOSTICS
+)
+
 # Install targets
 install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_codec_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli
     ARCHIVE DESTINATION lib
@@ -220,6 +266,8 @@ install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_cod
 )
 install(FILES
     src/common/gguf_loader.h
+    src/common/gpu_offload_policy.h
+    src/common/weight_residency.h
     src/common/coreml_code_predictor.h
     src/tokenizer/text_tokenizer.h
     src/transformer/tts_transformer.h
@@ -236,8 +284,20 @@ add_test(NAME tokenizer_test
     COMMAND test_tokenizer
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
+add_test(NAME gpu_offload_policy_test
+    COMMAND test_gpu_offload_policy
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME weight_residency_test
+    COMMAND test_weight_residency
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
 add_test(NAME encoder_test
     COMMAND test_encoder --tokenizer models/qwen3-tts-0.6b-f16.gguf --audio clone.wav --reference reference/ref_audio_embedding.bin
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME audio_tokenizer_encoder_lifecycle_test
+    COMMAND test_audio_tokenizer_encoder_lifecycle
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 add_test(NAME transformer_test
@@ -247,4 +307,16 @@ add_test(NAME transformer_test
 add_test(NAME decoder_test
     COMMAND test_decoder
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME pipeline_offload_lifecycle_test
+    COMMAND test_pipeline_offload_lifecycle
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME gpu_idle_offload_validation_test
+    COMMAND test_gpu_idle_offload_validation
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(gpu_idle_offload_validation_test PROPERTIES
+    LABELS "manual;gpu"
+    SKIP_REGULAR_EXPRESSION "SKIP:"
 )

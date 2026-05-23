@@ -1,5 +1,6 @@
 #include "pipeline/qwen3_tts.h"
 #include "common/gguf_loader.h"
+#include "common/gpu_offload_policy.h"
 
 #include <cstdio>
 #include <cstring>
@@ -92,6 +93,25 @@ static void log_memory_usage(const char * label) {
             format_bytes(mem.phys_footprint_bytes).c_str());
 }
 
+class guarded_operation {
+public:
+    guarded_operation(Qwen3TTS & tts, bool active)
+        : tts_(tts), active_(active) {}
+
+    ~guarded_operation() {
+        if (active_) {
+            tts_.finish_guarded_operation_locked();
+        }
+    }
+
+    guarded_operation(const guarded_operation &) = delete;
+    guarded_operation & operator=(const guarded_operation &) = delete;
+
+private:
+    Qwen3TTS & tts_;
+    bool active_;
+};
+
 static void resample_linear(const float * input, int input_len, int input_rate,
                             std::vector<float> & output, int output_rate) {
     double ratio = (double)input_rate / output_rate;
@@ -112,20 +132,280 @@ static void resample_linear(const float * input, int input_len, int input_rate,
     }
 }
 
-Qwen3TTS::Qwen3TTS() = default;
+Qwen3TTS::Qwen3TTS() {
+    publish_metadata_snapshot_locked(std::make_shared<model_metadata_snapshot>());
+}
 
-Qwen3TTS::~Qwen3TTS() = default;
+Qwen3TTS::~Qwen3TTS() {
+    stop_idle_worker();
+}
+
+bool Qwen3TTS::ensure_runtime_resident_locked(uint32_t required, std::string & error) {
+    ++idle_generation_;
+
+    const uint32_t transformer_mask = static_cast<uint32_t>(residency_component::transformer);
+    if ((required & transformer_mask) != 0 && transformer_loaded_ && transformer_.is_ram_offloaded()) {
+        if (!transformer_.reload_weights_from_ram(error)) {
+            if (error.empty()) {
+                error = "Failed to reload RAM-offloaded transformer weights";
+            }
+            return false;
+        }
+    }
+
+    const uint32_t decoder_mask = static_cast<uint32_t>(residency_component::decoder);
+    if ((required & decoder_mask) != 0 && decoder_loaded_ && audio_decoder_.is_ram_offloaded()) {
+        if (!audio_decoder_.reload_weights_from_ram(error)) {
+            if (error.empty()) {
+                error = "Failed to reload RAM-offloaded decoder weights";
+            }
+            return false;
+        }
+    }
+
+    ++active_operations_;
+    return true;
+}
+
+void Qwen3TTS::finish_guarded_operation_locked() {
+    if (active_operations_ > 0) {
+        --active_operations_;
+    }
+    ++idle_generation_;
+    if (gpu_idle_offload_enabled_ && active_operations_ == 0) {
+        idle_cv_.notify_all();
+    }
+}
+
+void Qwen3TTS::arm_idle_worker_locked() {
+    if (!gpu_idle_offload_enabled_) {
+        return;
+    }
+    ++idle_generation_;
+    idle_cv_.notify_all();
+}
+
+void Qwen3TTS::start_idle_worker_locked() {
+    if (!gpu_idle_offload_enabled_ || idle_worker_.joinable()) {
+        return;
+    }
+    idle_worker_shutdown_ = false;
+    idle_worker_ = std::thread(&Qwen3TTS::idle_worker_main, this);
+}
+
+void Qwen3TTS::stop_idle_worker_locked(std::unique_lock<std::mutex> & lock) {
+    idle_worker_shutdown_ = true;
+    ++idle_generation_;
+    idle_cv_.notify_all();
+
+    lock.unlock();
+    if (idle_worker_.joinable()) {
+        idle_worker_.join();
+    }
+    lock.lock();
+
+    idle_worker_shutdown_ = false;
+    active_operations_ = 0;
+    ++idle_generation_;
+}
+
+void Qwen3TTS::stop_idle_worker() {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    stop_idle_worker_locked(lock);
+}
+
+void Qwen3TTS::idle_worker_main() {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+
+    for (;;) {
+        idle_cv_.wait(lock, [this] {
+            return idle_worker_shutdown_ ||
+                   (gpu_idle_offload_enabled_ && active_operations_ == 0);
+        });
+
+        if (idle_worker_shutdown_) {
+            return;
+        }
+        if (!gpu_idle_offload_enabled_ || active_operations_ != 0 || gpu_offload_idle_secs_ <= 0) {
+            continue;
+        }
+
+        const uint64_t generation = idle_generation_;
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(gpu_offload_idle_secs_);
+        const bool interrupted = idle_cv_.wait_until(lock, deadline, [this, generation] {
+            return idle_worker_shutdown_ ||
+                   !gpu_idle_offload_enabled_ ||
+                   active_operations_ != 0 ||
+                   idle_generation_ != generation ||
+                   gpu_offload_idle_secs_ <= 0;
+        });
+
+        if (idle_worker_shutdown_) {
+            return;
+        }
+        if (interrupted ||
+            !gpu_idle_offload_enabled_ || active_operations_ != 0 ||
+            idle_generation_ != generation || gpu_offload_idle_secs_ <= 0) {
+            continue;
+        }
+
+        offload_idle_components_locked(false);
+    }
+}
+
+bool Qwen3TTS::offload_idle_components_locked(bool force_for_test, std::string * error) {
+    bool ok = true;
+    if (error) {
+        error->clear();
+    }
+
+    if (!transformer_loaded_ && !decoder_loaded_) {
+        return true;
+    }
+
+    if (transformer_loaded_ && !transformer_.is_ram_offloaded()) {
+        std::string component_error;
+        if (force_for_test) {
+            if (transformer_.offload_weights_to_ram(component_error, false)) {
+                fprintf(stderr, "  GPU idle RAM offload: transformer copied %s to host RAM\n",
+                        format_bytes((uint64_t) transformer_.ram_offloaded_bytes()).c_str());
+            } else {
+                ok = false;
+                fprintf(stderr, "  WARNING: GPU idle RAM offload failed for transformer: %s\n",
+                        component_error.c_str());
+                if (error && error->empty()) {
+                    *error = "Transformer idle RAM offload failed: " + component_error;
+                }
+            }
+        } else if (transformer_.can_offload_to_ram()) {
+            if (transformer_.offload_weights_to_ram(component_error)) {
+                fprintf(stderr, "  GPU idle RAM offload: transformer copied %s to host RAM\n",
+                        format_bytes((uint64_t) transformer_.ram_offloaded_bytes()).c_str());
+            } else {
+                ok = false;
+                fprintf(stderr, "  WARNING: GPU idle RAM offload failed for transformer: %s\n",
+                        component_error.c_str());
+                if (error && error->empty()) {
+                    *error = "Transformer idle RAM offload failed: " + component_error;
+                }
+            }
+        } else if (gpu_idle_offload_enabled_ && !logged_transformer_offload_ineligible_) {
+            fprintf(stderr, "  GPU idle RAM offload: transformer not eligible on this backend/current state\n");
+            logged_transformer_offload_ineligible_ = true;
+        }
+    }
+
+    if (decoder_loaded_ && !audio_decoder_.is_ram_offloaded()) {
+        std::string component_error;
+        if (force_for_test) {
+            if (audio_decoder_.offload_weights_to_ram(component_error, false)) {
+                fprintf(stderr, "  GPU idle RAM offload: decoder copied %s to host RAM\n",
+                        format_bytes((uint64_t) audio_decoder_.ram_offloaded_bytes()).c_str());
+            } else {
+                ok = false;
+                fprintf(stderr, "  WARNING: GPU idle RAM offload failed for decoder: %s\n",
+                        component_error.c_str());
+                if (error && error->empty()) {
+                    *error = "Decoder idle RAM offload failed: " + component_error;
+                }
+            }
+        } else if (audio_decoder_.can_offload_to_ram()) {
+            if (audio_decoder_.offload_weights_to_ram(component_error)) {
+                fprintf(stderr, "  GPU idle RAM offload: decoder copied %s to host RAM\n",
+                        format_bytes((uint64_t) audio_decoder_.ram_offloaded_bytes()).c_str());
+            } else {
+                ok = false;
+                fprintf(stderr, "  WARNING: GPU idle RAM offload failed for decoder: %s\n",
+                        component_error.c_str());
+                if (error && error->empty()) {
+                    *error = "Decoder idle RAM offload failed: " + component_error;
+                }
+            }
+        } else if (gpu_idle_offload_enabled_ && !logged_decoder_offload_ineligible_) {
+            fprintf(stderr, "  GPU idle RAM offload: decoder not eligible on this backend/current state\n");
+            logged_decoder_offload_ineligible_ = true;
+        }
+    }
+
+    return ok;
+}
+
+bool Qwen3TTS::force_transformer_offload_for_test(std::string & error) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    ++idle_generation_;
+    if (!transformer_loaded_) {
+        error = "Cannot force transformer RAM offload: transformer is not loaded";
+        return false;
+    }
+    return transformer_.offload_weights_to_ram(error, false);
+}
+
+bool Qwen3TTS::transformer_ram_offloaded_for_test() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return transformer_.is_ram_offloaded();
+}
+
+bool Qwen3TTS::decoder_ram_offloaded_for_test() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return audio_decoder_.is_ram_offloaded();
+}
+
+bool Qwen3TTS::force_idle_offload_once_for_test(std::string & error) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (active_operations_ != 0) {
+        error = "Cannot force idle RAM offload while an operation is active";
+        return false;
+    }
+    ++idle_generation_;
+    return offload_idle_components_locked(true, &error);
+}
+
+void Qwen3TTS::publish_metadata_snapshot_locked(
+        std::shared_ptr<const model_metadata_snapshot> snapshot) {
+    if (!snapshot) {
+        snapshot = std::make_shared<model_metadata_snapshot>();
+    }
+    metadata_snapshot_ = snapshot;
+    retained_metadata_snapshots_.push_back(std::move(snapshot));
+}
+
+const Qwen3TTS::model_metadata_snapshot & Qwen3TTS::metadata_snapshot_locked() const {
+    if (metadata_snapshot_) {
+        return *metadata_snapshot_;
+    }
+    static const model_metadata_snapshot empty;
+    return empty;
+}
 
 bool Qwen3TTS::load_models(const std::string & model_dir,
                            const std::string & tts_model,
                            const std::string & tokenizer_model) {
+    std::lock_guard<std::mutex> reload_lock(reload_mutex_);
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+
+    models_loaded_ = false;
+    publish_metadata_snapshot_locked(std::make_shared<model_metadata_snapshot>());
+    stop_idle_worker_locked(lock);
+
     int64_t t_start = get_time_ms();
     log_memory_usage("load/start");
 
     transformer_.unload_model();
     audio_decoder_.unload_model();
+    audio_encoder_.unload_model();
+    codec_encoder_.unload_model();
+    encoder_loaded_ = false;
+    codec_encoder_loaded_ = false;
     transformer_loaded_ = false;
     decoder_loaded_ = false;
+
+    auto fail_load = [this](const std::string & error) {
+        error_msg_ = error;
+        models_loaded_ = false;
+        ++idle_generation_;
+        return false;
+    };
 
     // Construct model paths — explicit paths override auto-detection
     if (!tts_model.empty()) {
@@ -148,6 +428,7 @@ bool Qwen3TTS::load_models(const std::string & model_dir,
         decoder_model_path_ = model_dir + "/qwen3-tts-tokenizer-f16.gguf";
     }
     encoder_loaded_ = false;
+    codec_encoder_loaded_ = false;
     transformer_loaded_ = false;
     decoder_loaded_ = false;
 
@@ -156,6 +437,16 @@ bool Qwen3TTS::load_models(const std::string & model_dir,
     if (low_mem_mode_) {
         fprintf(stderr, "  Low-memory mode enabled (lazy decoder + component unloads)\n");
     }
+
+    auto policy = parse_gpu_offload_policy(std::getenv("QWEN3_TTS_GPU_OFFLOAD_IDLE_SECS"),
+                                           low_mem_mode_);
+    gpu_idle_offload_enabled_ = policy.enabled;
+    gpu_offload_idle_secs_ = policy.idle_secs;
+    logged_transformer_offload_ineligible_ = false;
+    logged_decoder_offload_ineligible_ = false;
+    fprintf(stderr, "  GPU idle RAM offload: %s (%s)\n",
+            gpu_idle_offload_enabled_ ? "enabled" : "disabled",
+            policy.reason.c_str());
     
     // Load TTS model (contains text tokenizer + transformer for generation)
     fprintf(stderr, "Loading TTS model from %s...\n", tts_model_path_.c_str());
@@ -165,13 +456,11 @@ bool Qwen3TTS::load_models(const std::string & model_dir,
     {
         GGUFLoader loader;
         if (!loader.open(tts_model_path_)) {
-            error_msg_ = "Failed to open TTS model: " + loader.get_error();
-            return false;
+            return fail_load("Failed to open TTS model: " + loader.get_error());
         }
         
         if (!tokenizer_.load_from_gguf(loader.get_ctx())) {
-            error_msg_ = "Failed to load text tokenizer: " + tokenizer_.get_error();
-            return false;
+            return fail_load("Failed to load text tokenizer: " + tokenizer_.get_error());
         }
         fprintf(stderr, "  Text tokenizer loaded: vocab_size=%d (%lld ms)\n",
                 tokenizer_.get_config().vocab_size,
@@ -185,10 +474,17 @@ bool Qwen3TTS::load_models(const std::string & model_dir,
     // Load TTS transformer from TTS model
     int64_t t_transformer_start = get_time_ms();
     if (!transformer_.load_model(tts_model_path_)) {
-        error_msg_ = "Failed to load TTS transformer: " + transformer_.get_error();
-        return false;
+        return fail_load("Failed to load TTS transformer: " + transformer_.get_error());
     }
     transformer_loaded_ = true;
+    auto metadata = std::make_shared<model_metadata_snapshot>();
+    const auto & transformer_config = transformer_.get_config();
+    metadata->model_type = transformer_config.model_type;
+    metadata->model_size = transformer_config.model_size;
+    metadata->has_speaker_encoder = transformer_config.has_speaker_encoder;
+    metadata->speaker_names = transformer_config.speaker_names;
+    metadata->speaker_ids = transformer_config.speaker_ids;
+    metadata->speaker_dialects = transformer_config.speaker_dialects;
     fprintf(stderr, "  TTS transformer loaded: hidden_size=%d, n_layers=%d (%lld ms)\n",
             transformer_.get_config().hidden_size, transformer_.get_config().n_layers,
             (long long)(get_time_ms() - t_transformer_start));
@@ -199,8 +495,7 @@ bool Qwen3TTS::load_models(const std::string & model_dir,
         fprintf(stderr, "Loading vocoder from %s...\n", decoder_model_path_.c_str());
         int64_t t_decoder_start = get_time_ms();
         if (!audio_decoder_.load_model(decoder_model_path_)) {
-            error_msg_ = "Failed to load vocoder: " + audio_decoder_.get_error();
-            return false;
+            return fail_load("Failed to load vocoder: " + audio_decoder_.get_error());
         }
         decoder_loaded_ = true;
         fprintf(stderr, "  Vocoder loaded: sample_rate=%d, n_codebooks=%d (%lld ms)\n",
@@ -212,6 +507,9 @@ bool Qwen3TTS::load_models(const std::string & model_dir,
     }
     
     models_loaded_ = true;
+    publish_metadata_snapshot_locked(std::move(metadata));
+    arm_idle_worker_locked();
+    start_idle_worker_locked();
     
     int64_t t_end = get_time_ms();
     fprintf(stderr, "All models loaded in %lld ms\n", (long long)(t_end - t_start));
@@ -222,24 +520,49 @@ bool Qwen3TTS::load_models(const std::string & model_dir,
 
 tts_result Qwen3TTS::synthesize(const std::string & text,
                                  const tts_params & params) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
     tts_result result;
     
     if (!models_loaded_) {
         result.error_msg = "Models not loaded";
         return result;
     }
+
+    const uint32_t required = static_cast<uint32_t>(residency_component::transformer) |
+        (decoder_loaded_ ? static_cast<uint32_t>(residency_component::decoder) : 0u);
+    std::string resident_error;
+    if (!ensure_runtime_resident_locked(required, resident_error)) {
+        result.error_msg = resident_error;
+        return result;
+    }
+    guarded_operation operation_guard(*this, true);
     
     // For basic synthesis without voice cloning, we use a zero speaker embedding
     // This will use the model's default voice characteristics
     std::vector<float> zero_embedding(transformer_.get_config().hidden_size, 0.0f);
     
-    return synthesize_internal(text, zero_embedding.data(), params, result);
+    return synthesize_internal_unlocked(text, zero_embedding.data(), params, result);
 }
 
 tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const std::string & reference_audio,
                                             const tts_params & params) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
     tts_result result;
+
+    if (!models_loaded_) {
+        result.error_msg = "Models not loaded";
+        return result;
+    }
+
+    const uint32_t required = static_cast<uint32_t>(residency_component::transformer) |
+        static_cast<uint32_t>(residency_component::decoder);
+    std::string resident_error;
+    if (!ensure_runtime_resident_locked(required, resident_error)) {
+        result.error_msg = resident_error;
+        return result;
+    }
+    guarded_operation operation_guard(*this, true);
     
     std::vector<float> ref_samples;
     int ref_sample_rate;
@@ -256,12 +579,15 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
         ref_samples = std::move(resampled);
     }
     
-    return synthesize_with_voice(text, ref_samples.data(), (int32_t)ref_samples.size(), params);
+    return synthesize_with_voice_samples_unlocked(text, ref_samples.data(),
+                                                  (int32_t) ref_samples.size(),
+                                                  params, result);
 }
 
 tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const float * ref_samples, int32_t n_ref_samples,
                                             const tts_params & params) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
     tts_result result;
     
     if (!models_loaded_) {
@@ -269,6 +595,23 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
         return result;
     }
 
+    const uint32_t required = static_cast<uint32_t>(residency_component::transformer) |
+        static_cast<uint32_t>(residency_component::decoder);
+    std::string resident_error;
+    if (!ensure_runtime_resident_locked(required, resident_error)) {
+        result.error_msg = resident_error;
+        return result;
+    }
+    guarded_operation operation_guard(*this, true);
+
+    return synthesize_with_voice_samples_unlocked(text, ref_samples, n_ref_samples, params, result);
+}
+
+tts_result Qwen3TTS::synthesize_with_voice_samples_unlocked(const std::string & text,
+                                                             const float * ref_samples,
+                                                             int32_t n_ref_samples,
+                                                             const tts_params & params,
+                                                             tts_result & result) {
     if (!encoder_loaded_) {
         if (tts_model_path_.empty()) {
             result.error_msg = "Internal error: missing TTS model path for lazy encoder load";
@@ -332,21 +675,36 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
         if (params.print_progress) {
             fprintf(stderr, "Reference codes: %d frames x 16 codebooks (ICL mode)\n", n_ref_frames);
         }
-        return synthesize_internal(text, speaker_embedding.data(), params, result,
-                                   ref_codes.data(), n_ref_frames);
+        return synthesize_internal_unlocked(text, speaker_embedding.data(), params, result,
+                                            ref_codes.data(), n_ref_frames);
     }
 
-    return synthesize_internal(text, speaker_embedding.data(), params, result);
+    return synthesize_internal_unlocked(text, speaker_embedding.data(), params, result);
 }
 
 bool Qwen3TTS::extract_speaker_embedding(const float * ref_samples, int32_t n_ref_samples,
                                           std::vector<float> & embedding,
                                           const tts_params & params) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
     if (!models_loaded_) {
         error_msg_ = "Models not loaded";
         return false;
     }
 
+    std::string resident_error;
+    if (!ensure_runtime_resident_locked(0u, resident_error)) {
+        error_msg_ = resident_error;
+        return false;
+    }
+    guarded_operation operation_guard(*this, true);
+
+    return extract_speaker_embedding_unlocked(ref_samples, n_ref_samples, embedding, params);
+}
+
+bool Qwen3TTS::extract_speaker_embedding_unlocked(const float * ref_samples,
+                                                  int32_t n_ref_samples,
+                                                  std::vector<float> & embedding,
+                                                  const tts_params & params) {
     if (!encoder_loaded_) {
         if (tts_model_path_.empty()) {
             error_msg_ = "Internal error: missing TTS model path for lazy encoder load";
@@ -375,12 +733,22 @@ bool Qwen3TTS::extract_speaker_embedding(const float * ref_samples, int32_t n_re
 tts_result Qwen3TTS::synthesize_with_embedding(const std::string & text,
                                                 const float * embedding, int32_t embedding_size,
                                                 const tts_params & params) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
     tts_result result;
 
     if (!models_loaded_) {
         result.error_msg = "Models not loaded";
         return result;
     }
+
+    const uint32_t required = static_cast<uint32_t>(residency_component::transformer) |
+        static_cast<uint32_t>(residency_component::decoder);
+    std::string resident_error;
+    if (!ensure_runtime_resident_locked(required, resident_error)) {
+        result.error_msg = resident_error;
+        return result;
+    }
+    guarded_operation operation_guard(*this, true);
 
     if (embedding == nullptr || embedding_size <= 0) {
         result.error_msg = "Invalid speaker embedding";
@@ -395,15 +763,15 @@ tts_result Qwen3TTS::synthesize_with_embedding(const std::string & text,
         return result;
     }
 
-    return synthesize_internal(text, embedding, params, result);
+    return synthesize_internal_unlocked(text, embedding, params, result);
 }
 
-tts_result Qwen3TTS::synthesize_internal(const std::string & text,
-                                          const float * speaker_embedding,
-                                          const tts_params & params,
-                                          tts_result & result,
-                                          const int32_t * ref_codes,
-                                          int32_t n_ref_frames) {
+tts_result Qwen3TTS::synthesize_internal_unlocked(const std::string & text,
+                                                   const float * speaker_embedding,
+                                                   const tts_params & params,
+                                                   tts_result & result,
+                                                   const int32_t * ref_codes,
+                                                   int32_t n_ref_frames) {
     int64_t t_total_start = get_time_ms();
     auto sample_memory = [&](const char * stage) {
         process_memory_snapshot mem;
@@ -623,45 +991,92 @@ void Qwen3TTS::set_progress_callback(tts_progress_callback_t callback) {
 // --- Model metadata & speaker-preset accessors ------------------------------
 
 const std::string & Qwen3TTS::get_model_type() const {
-    return transformer_.get_config().model_type;
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return metadata_snapshot_locked().model_type;
 }
 
 const std::string & Qwen3TTS::get_model_size() const {
-    return transformer_.get_config().model_size;
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return metadata_snapshot_locked().model_size;
 }
 
 bool Qwen3TTS::has_speaker_encoder() const {
-    return transformer_.get_config().has_speaker_encoder;
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return metadata_snapshot_locked().has_speaker_encoder;
 }
 
 const std::vector<std::string> & Qwen3TTS::get_speaker_names() const {
-    return transformer_.get_config().speaker_names;
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return metadata_snapshot_locked().speaker_names;
 }
 
 const std::vector<int32_t> & Qwen3TTS::get_speaker_ids() const {
-    return transformer_.get_config().speaker_ids;
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return metadata_snapshot_locked().speaker_ids;
 }
 
 const std::vector<std::string> & Qwen3TTS::get_speaker_dialects() const {
-    return transformer_.get_config().speaker_dialects;
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return metadata_snapshot_locked().speaker_dialects;
 }
 
 int32_t Qwen3TTS::get_speaker_id(const std::string & name) const {
-    const auto & cfg = transformer_.get_config();
-    for (size_t i = 0; i < cfg.speaker_names.size(); ++i) {
-        if (cfg.speaker_names[i] == name) {
-            return cfg.speaker_ids[i];
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    const auto & metadata = metadata_snapshot_locked();
+    for (size_t i = 0; i < metadata.speaker_names.size(); ++i) {
+        if (metadata.speaker_names[i] == name) {
+            return metadata.speaker_ids[i];
         }
     }
     return -1;
 }
 
+bool Qwen3TTS::is_loaded() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return models_loaded_;
+}
+
 bool Qwen3TTS::get_speaker_embedding(const std::string & name, std::vector<float> & out) {
-    int32_t tid = get_speaker_id(name);
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+
+    if (!models_loaded_) {
+        error_msg_ = "Models not loaded";
+        return false;
+    }
+
+    if (!transformer_loaded_) {
+        if (tts_model_path_.empty()) {
+            error_msg_ = "Internal error: missing TTS model path for transformer reload";
+            return false;
+        }
+        if (!transformer_.load_model(tts_model_path_)) {
+            error_msg_ = "Failed to reload TTS transformer: " + transformer_.get_error();
+            return false;
+        }
+        transformer_loaded_ = true;
+    }
+
+    const auto & cfg = metadata_snapshot_locked();
+    int32_t tid = -1;
+    for (size_t i = 0; i < cfg.speaker_names.size(); ++i) {
+        if (cfg.speaker_names[i] == name) {
+            tid = cfg.speaker_ids[i];
+            break;
+        }
+    }
     if (tid < 0) {
         error_msg_ = "Unknown speaker preset: " + name;
         return false;
     }
+
+    std::string resident_error;
+    if (!ensure_runtime_resident_locked(static_cast<uint32_t>(residency_component::transformer),
+                                        resident_error)) {
+        error_msg_ = resident_error;
+        return false;
+    }
+    guarded_operation operation_guard(*this, true);
+
     if (!transformer_.get_codec_embedding_row(tid, out)) {
         error_msg_ = "Failed to read codec_embd row: " + transformer_.get_error();
         return false;
