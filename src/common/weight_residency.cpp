@@ -154,6 +154,10 @@ bool upload_tensors_from_host(ggml_context * ctx,
         error = "Cannot upload tensors: backend is null";
         return false;
     }
+    if (!ggml_get_no_alloc(ctx)) {
+        error = "Cannot upload tensors: ggml context must be no_alloc";
+        return false;
+    }
 
     std::map<std::string, const host_tensor_copy *> store_by_name;
     size_t store_total_bytes = 0;
