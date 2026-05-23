@@ -1,5 +1,6 @@
 #include "pipeline/qwen3_tts.h"
 #include "common/gguf_loader.h"
+#include "common/gpu_offload_policy.h"
 
 #include <cstdio>
 #include <cstring>
@@ -114,13 +115,198 @@ static void resample_linear(const float * input, int input_len, int input_rate,
 
 Qwen3TTS::Qwen3TTS() = default;
 
-Qwen3TTS::~Qwen3TTS() = default;
+Qwen3TTS::~Qwen3TTS() {
+    stop_idle_worker();
+}
+
+bool Qwen3TTS::ensure_runtime_resident_locked(uint32_t required, std::string & error) {
+    ++idle_generation_;
+
+    const uint32_t transformer_mask = static_cast<uint32_t>(residency_component::transformer);
+    if ((required & transformer_mask) != 0 && transformer_loaded_ && transformer_.is_ram_offloaded()) {
+        if (!transformer_.reload_weights_from_ram(error)) {
+            if (error.empty()) {
+                error = "Failed to reload RAM-offloaded transformer weights";
+            }
+            return false;
+        }
+    }
+
+    const uint32_t decoder_mask = static_cast<uint32_t>(residency_component::decoder);
+    if ((required & decoder_mask) != 0 && decoder_loaded_ && audio_decoder_.is_ram_offloaded()) {
+        if (!audio_decoder_.reload_weights_from_ram(error)) {
+            if (error.empty()) {
+                error = "Failed to reload RAM-offloaded decoder weights";
+            }
+            return false;
+        }
+    }
+
+    operation_active_ = true;
+    return true;
+}
+
+void Qwen3TTS::finish_guarded_operation_locked() {
+    operation_active_ = false;
+    ++idle_generation_;
+    if (gpu_idle_offload_enabled_) {
+        idle_cv_.notify_all();
+    }
+}
+
+void Qwen3TTS::arm_idle_worker_locked() {
+    if (!gpu_idle_offload_enabled_) {
+        return;
+    }
+    ++idle_generation_;
+    idle_cv_.notify_all();
+}
+
+void Qwen3TTS::start_idle_worker_locked() {
+    if (!gpu_idle_offload_enabled_ || idle_worker_.joinable()) {
+        return;
+    }
+    idle_worker_shutdown_ = false;
+    idle_worker_ = std::thread(&Qwen3TTS::idle_worker_main, this);
+}
+
+void Qwen3TTS::stop_idle_worker() {
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        idle_worker_shutdown_ = true;
+        ++idle_generation_;
+        idle_cv_.notify_all();
+    }
+
+    if (idle_worker_.joinable()) {
+        idle_worker_.join();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        idle_worker_shutdown_ = false;
+        operation_active_ = false;
+        ++idle_generation_;
+    }
+}
+
+void Qwen3TTS::idle_worker_main() {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+
+    for (;;) {
+        idle_cv_.wait(lock, [this] {
+            return idle_worker_shutdown_ ||
+                   (gpu_idle_offload_enabled_ && !operation_active_);
+        });
+
+        if (idle_worker_shutdown_) {
+            return;
+        }
+        if (!gpu_idle_offload_enabled_ || operation_active_ || gpu_offload_idle_secs_ <= 0) {
+            continue;
+        }
+
+        const uint64_t generation = idle_generation_;
+        const auto idle_timeout = std::chrono::seconds(gpu_offload_idle_secs_);
+        idle_cv_.wait_for(lock, idle_timeout);
+
+        if (idle_worker_shutdown_) {
+            return;
+        }
+        if (!gpu_idle_offload_enabled_ || operation_active_ ||
+            idle_generation_ != generation || gpu_offload_idle_secs_ <= 0) {
+            continue;
+        }
+
+        offload_idle_components_locked(false);
+    }
+}
+
+bool Qwen3TTS::offload_idle_components_locked(bool force_for_test, std::string * error) {
+    bool ok = true;
+    if (error) {
+        error->clear();
+    }
+
+    if (!transformer_loaded_ && !decoder_loaded_) {
+        return true;
+    }
+
+    if (transformer_loaded_ && !transformer_.is_ram_offloaded()) {
+        std::string component_error;
+        if (force_for_test || transformer_.can_offload_to_ram()) {
+            if (transformer_.offload_weights_to_ram(component_error)) {
+                fprintf(stderr, "  GPU idle RAM offload: transformer copied %s to host RAM\n",
+                        format_bytes((uint64_t) transformer_.ram_offloaded_bytes()).c_str());
+            } else {
+                ok = false;
+                fprintf(stderr, "  WARNING: GPU idle RAM offload failed for transformer: %s\n",
+                        component_error.c_str());
+                if (error && error->empty()) {
+                    *error = "Transformer idle RAM offload failed: " + component_error;
+                }
+            }
+        } else if (gpu_idle_offload_enabled_ && !logged_transformer_offload_ineligible_) {
+            fprintf(stderr, "  GPU idle RAM offload: transformer not eligible on this backend/current state\n");
+            logged_transformer_offload_ineligible_ = true;
+        }
+    }
+
+    if (decoder_loaded_ && !audio_decoder_.is_ram_offloaded()) {
+        std::string component_error;
+        if (force_for_test || audio_decoder_.can_offload_to_ram()) {
+            if (audio_decoder_.offload_weights_to_ram(component_error)) {
+                fprintf(stderr, "  GPU idle RAM offload: decoder copied %s to host RAM\n",
+                        format_bytes((uint64_t) audio_decoder_.ram_offloaded_bytes()).c_str());
+            } else {
+                ok = false;
+                fprintf(stderr, "  WARNING: GPU idle RAM offload failed for decoder: %s\n",
+                        component_error.c_str());
+                if (error && error->empty()) {
+                    *error = "Decoder idle RAM offload failed: " + component_error;
+                }
+            }
+        } else if (gpu_idle_offload_enabled_ && !logged_decoder_offload_ineligible_) {
+            fprintf(stderr, "  GPU idle RAM offload: decoder not eligible on this backend/current state\n");
+            logged_decoder_offload_ineligible_ = true;
+        }
+    }
+
+    return ok;
+}
+
+bool Qwen3TTS::force_transformer_offload_for_test(std::string & error) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    ++idle_generation_;
+    if (!transformer_loaded_) {
+        error = "Cannot force transformer RAM offload: transformer is not loaded";
+        return false;
+    }
+    return transformer_.offload_weights_to_ram(error);
+}
+
+bool Qwen3TTS::transformer_ram_offloaded_for_test() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return transformer_.is_ram_offloaded();
+}
+
+bool Qwen3TTS::force_idle_offload_once_for_test(std::string & error) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (operation_active_) {
+        error = "Cannot force idle RAM offload while an operation is active";
+        return false;
+    }
+    ++idle_generation_;
+    return offload_idle_components_locked(true, &error);
+}
 
 bool Qwen3TTS::load_models(const std::string & model_dir,
                            const std::string & tts_model,
                            const std::string & tokenizer_model) {
     int64_t t_start = get_time_ms();
     log_memory_usage("load/start");
+
+    stop_idle_worker();
 
     transformer_.unload_model();
     audio_decoder_.unload_model();
@@ -156,6 +342,16 @@ bool Qwen3TTS::load_models(const std::string & model_dir,
     if (low_mem_mode_) {
         fprintf(stderr, "  Low-memory mode enabled (lazy decoder + component unloads)\n");
     }
+
+    auto policy = parse_gpu_offload_policy(std::getenv("QWEN3_TTS_GPU_OFFLOAD_IDLE_SECS"),
+                                           low_mem_mode_);
+    gpu_idle_offload_enabled_ = policy.enabled;
+    gpu_offload_idle_secs_ = policy.idle_secs;
+    logged_transformer_offload_ineligible_ = false;
+    logged_decoder_offload_ineligible_ = false;
+    fprintf(stderr, "  GPU idle RAM offload: %s (%s)\n",
+            gpu_idle_offload_enabled_ ? "enabled" : "disabled",
+            policy.reason.c_str());
     
     // Load TTS model (contains text tokenizer + transformer for generation)
     fprintf(stderr, "Loading TTS model from %s...\n", tts_model_path_.c_str());
@@ -212,6 +408,12 @@ bool Qwen3TTS::load_models(const std::string & model_dir,
     }
     
     models_loaded_ = true;
+
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        arm_idle_worker_locked();
+        start_idle_worker_locked();
+    }
     
     int64_t t_end = get_time_ms();
     fprintf(stderr, "All models loaded in %lld ms\n", (long long)(t_end - t_start));

@@ -6,7 +6,10 @@
 #include "encoder/audio_codec_encoder.h"
 #include "decoder/audio_tokenizer_decoder.h"
 
+#include <condition_variable>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 #include <functional>
 #include <cstdint>
@@ -174,14 +177,32 @@ public:
 
     // Check if models are loaded
     bool is_loaded() const { return models_loaded_; }
+
+    bool force_transformer_offload_for_test(std::string & error);
+    bool transformer_ram_offloaded_for_test() const;
+    bool force_idle_offload_once_for_test(std::string & error);
     
 private:
+    enum class residency_component : uint32_t {
+        none = 0,
+        transformer = 1u << 0,
+        decoder = 1u << 1,
+    };
+
     tts_result synthesize_internal(const std::string & text,
                                    const float * speaker_embedding,
                                    const tts_params & params,
                                    tts_result & result,
                                    const int32_t * ref_codes = nullptr,
                                    int32_t n_ref_frames = 0);
+
+    bool ensure_runtime_resident_locked(uint32_t required, std::string & error);
+    void finish_guarded_operation_locked();
+    void arm_idle_worker_locked();
+    void start_idle_worker_locked();
+    void stop_idle_worker();
+    void idle_worker_main();
+    bool offload_idle_components_locked(bool force_for_test = false, std::string * error = nullptr);
 
     TextTokenizer tokenizer_;
     TTSTransformer transformer_;
@@ -199,6 +220,17 @@ private:
     std::string tts_model_path_;
     std::string decoder_model_path_;
     tts_progress_callback_t progress_callback_;
+
+    mutable std::mutex lifecycle_mutex_;
+    std::condition_variable idle_cv_;
+    std::thread idle_worker_;
+    bool idle_worker_shutdown_ = false;
+    bool operation_active_ = false;
+    uint64_t idle_generation_ = 0;
+    int gpu_offload_idle_secs_ = 0;
+    bool gpu_idle_offload_enabled_ = false;
+    bool logged_transformer_offload_ineligible_ = false;
+    bool logged_decoder_offload_ineligible_ = false;
 };
 
 // Utility: Load audio file (WAV format)
