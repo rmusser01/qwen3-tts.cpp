@@ -180,6 +180,13 @@ bool AudioTokenizerDecoder::load_model(const std::string & model_path) {
         error_msg_ = "Failed to initialize GGML context";
         return false;
     }
+
+    auto fail_after_context_created = [this]() {
+        const std::string failure = error_msg_;
+        unload_model();
+        error_msg_ = failure;
+        return false;
+    };
     
     struct gguf_context * gguf_ctx = loader.get_ctx();
     struct ggml_context * meta_ctx = loader.get_meta_ctx();
@@ -387,7 +394,7 @@ bool AudioTokenizerDecoder::load_model(const std::string & model_path) {
     if (!load_tensor_data_from_file(model_path, gguf_ctx, model_.ctx,
                                      model_.tensors, model_.buffer, error_msg_,
                                      GGML_BACKEND_DEVICE_TYPE_IGPU)) {
-        return false;
+        return fail_after_context_created();
     }
     
     for (int i = 0; i < 4; ++i) {
@@ -400,7 +407,7 @@ bool AudioTokenizerDecoder::load_model(const std::string & model_path) {
 
     state_.backend = init_preferred_backend("AudioTokenizerDecoder", &error_msg_);
     if (!state_.backend) {
-        return false;
+        return fail_after_context_created();
     }
 
     ggml_backend_dev_t device = ggml_backend_get_device(state_.backend);
@@ -411,12 +418,12 @@ bool AudioTokenizerDecoder::load_model(const std::string & model_path) {
         state_.backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
         if (!state_.backend_cpu) {
             error_msg_ = "Failed to initialize CPU fallback backend for AudioTokenizerDecoder";
-            return false;
+            return fail_after_context_created();
         }
     }
 
     if (!create_decoder_scheduler(state_, error_msg_)) {
-        return false;
+        return fail_after_context_created();
     }
 
     state_.compute_meta.resize(ggml_tensor_overhead() * QWEN3_TTS_DEC_MAX_NODES + ggml_graph_overhead());
@@ -535,6 +542,14 @@ size_t AudioTokenizerDecoder::ram_offloaded_bytes() const {
 bool AudioTokenizerDecoder::require_weights_gpu_resident() {
     if (model_.residency == weight_residency::RamResident) {
         error_msg_ = "Audio decoder weights are RAM-offloaded; reload_weights_from_ram() first";
+        return false;
+    }
+    if (model_.residency == weight_residency::Unloaded) {
+        error_msg_ = "Audio decoder model is not loaded";
+        return false;
+    }
+    if (model_.residency != weight_residency::GpuResident) {
+        error_msg_ = "Audio decoder weights are not GPU-resident";
         return false;
     }
     return true;
@@ -1164,9 +1179,7 @@ void free_audio_decoder_model(audio_decoder_model & model) {
         ggml_free(model.ctx);
         model.ctx = nullptr;
     }
-    model.host_weights.clear();
-    model.residency = weight_residency::Unloaded;
-    model.tensors.clear();
+    model = audio_decoder_model();
 }
 
 } // namespace qwen3_tts

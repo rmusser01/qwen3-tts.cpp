@@ -63,6 +63,18 @@ int main(int argc, char ** argv) {
     printf("=== Audio Tokenizer Decoder Test ===\n\n");
     
     qwen3_tts::AudioTokenizerDecoder decoder;
+
+    std::vector<float> unloaded_samples;
+    int32_t unloaded_code = 0;
+    if (decoder.decode(&unloaded_code, 1, unloaded_samples)) {
+        fprintf(stderr, "  FAIL: decoder allowed decode before model load\n");
+        return 1;
+    }
+    if (decoder.get_error() != "Audio decoder model is not loaded") {
+        fprintf(stderr, "  FAIL: unexpected unloaded decoder error: %s\n",
+                decoder.get_error().c_str());
+        return 1;
+    }
     
     printf("Test 1: Load model from %s\n", tokenizer_path);
     if (!decoder.load_model(tokenizer_path)) {
