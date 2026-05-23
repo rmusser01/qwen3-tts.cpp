@@ -145,24 +145,42 @@ bool upload_tensors_from_host(ggml_context * ctx,
         return false;
     }
 
+    std::map<std::string, const host_tensor_copy *> store_by_name;
     for (const host_tensor_copy & copy : store.tensors) {
-        auto it = tensors.find(copy.name);
-        if (it == tensors.end()) {
+        if (store_by_name.find(copy.name) != store_by_name.end()) {
+            error = "Cannot upload duplicate tensor copy: " + copy.name;
+            return false;
+        }
+        if (tensors.find(copy.name) == tensors.end()) {
             error = "Cannot upload tensor not present in destination map: " + copy.name;
             return false;
         }
-        if (!it->second) {
-            error = "Cannot upload to null tensor: " + copy.name;
+        store_by_name[copy.name] = &copy;
+    }
+
+    if (store.tensors.size() != tensors.size()) {
+        error = "incomplete host tensor store for destination tensor map";
+        return false;
+    }
+
+    for (const auto & entry : tensors) {
+        auto copy_it = store_by_name.find(entry.first);
+        if (copy_it == store_by_name.end()) {
+            error = "Cannot upload missing tensor copy: " + entry.first;
             return false;
         }
-        if (!tensor_belongs_to_context(ctx, it->second)) {
-            error = "Cannot upload tensor from a different context: " + copy.name;
+        if (!entry.second) {
+            error = "Cannot upload to null tensor: " + entry.first;
+            return false;
+        }
+        if (!tensor_belongs_to_context(ctx, entry.second)) {
+            error = "Cannot upload tensor from a different context: " + entry.first;
             return false;
         }
 
-        const size_t expected = ggml_nbytes(it->second);
-        if (copy.bytes.size() != expected) {
-            error = "Cannot upload tensor with mismatched byte size: " + copy.name;
+        const size_t expected = ggml_nbytes(entry.second);
+        if (copy_it->second->bytes.size() != expected) {
+            error = "Cannot upload tensor with mismatched byte size: " + entry.first;
             return false;
         }
     }
