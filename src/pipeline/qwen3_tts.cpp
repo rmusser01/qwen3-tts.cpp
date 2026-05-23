@@ -142,14 +142,16 @@ bool Qwen3TTS::ensure_runtime_resident_locked(uint32_t required, std::string & e
         }
     }
 
-    operation_active_ = true;
+    ++active_operations_;
     return true;
 }
 
 void Qwen3TTS::finish_guarded_operation_locked() {
-    operation_active_ = false;
+    if (active_operations_ > 0) {
+        --active_operations_;
+    }
     ++idle_generation_;
-    if (gpu_idle_offload_enabled_) {
+    if (gpu_idle_offload_enabled_ && active_operations_ == 0) {
         idle_cv_.notify_all();
     }
 }
@@ -185,7 +187,7 @@ void Qwen3TTS::stop_idle_worker() {
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
         idle_worker_shutdown_ = false;
-        operation_active_ = false;
+        active_operations_ = 0;
         ++idle_generation_;
     }
 }
@@ -196,24 +198,32 @@ void Qwen3TTS::idle_worker_main() {
     for (;;) {
         idle_cv_.wait(lock, [this] {
             return idle_worker_shutdown_ ||
-                   (gpu_idle_offload_enabled_ && !operation_active_);
+                   (gpu_idle_offload_enabled_ && active_operations_ == 0);
         });
 
         if (idle_worker_shutdown_) {
             return;
         }
-        if (!gpu_idle_offload_enabled_ || operation_active_ || gpu_offload_idle_secs_ <= 0) {
+        if (!gpu_idle_offload_enabled_ || active_operations_ != 0 || gpu_offload_idle_secs_ <= 0) {
             continue;
         }
 
         const uint64_t generation = idle_generation_;
-        const auto idle_timeout = std::chrono::seconds(gpu_offload_idle_secs_);
-        idle_cv_.wait_for(lock, idle_timeout);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(gpu_offload_idle_secs_);
+        const bool interrupted = idle_cv_.wait_until(lock, deadline, [this, generation] {
+            return idle_worker_shutdown_ ||
+                   !gpu_idle_offload_enabled_ ||
+                   active_operations_ != 0 ||
+                   idle_generation_ != generation ||
+                   gpu_offload_idle_secs_ <= 0;
+        });
 
         if (idle_worker_shutdown_) {
             return;
         }
-        if (!gpu_idle_offload_enabled_ || operation_active_ ||
+        if (interrupted ||
+            !gpu_idle_offload_enabled_ || active_operations_ != 0 ||
             idle_generation_ != generation || gpu_offload_idle_secs_ <= 0) {
             continue;
         }
@@ -316,7 +326,7 @@ bool Qwen3TTS::transformer_ram_offloaded_for_test() const {
 
 bool Qwen3TTS::force_idle_offload_once_for_test(std::string & error) {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (operation_active_) {
+    if (active_operations_ != 0) {
         error = "Cannot force idle RAM offload while an operation is active";
         return false;
     }

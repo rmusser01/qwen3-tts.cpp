@@ -16,6 +16,19 @@
 
 namespace qwen3_tts {
 
+class Qwen3TTS;
+
+#ifdef QWEN3_TTS_ENABLE_TEST_DIAGNOSTICS
+// Opt-in C++ diagnostics for deterministic lifecycle tests. These are not
+// exposed through the C API or Python bindings.
+class Qwen3TTSDiagnostics {
+public:
+    static bool force_transformer_offload(Qwen3TTS & tts, std::string & error);
+    static bool transformer_ram_offloaded(const Qwen3TTS & tts);
+    static bool force_idle_offload_once(Qwen3TTS & tts, std::string & error);
+};
+#endif
+
 // TTS generation parameters
 struct tts_params {
     // Maximum number of audio tokens to generate
@@ -177,12 +190,12 @@ public:
 
     // Check if models are loaded
     bool is_loaded() const { return models_loaded_; }
-
-    bool force_transformer_offload_for_test(std::string & error);
-    bool transformer_ram_offloaded_for_test() const;
-    bool force_idle_offload_once_for_test(std::string & error);
     
 private:
+#ifdef QWEN3_TTS_ENABLE_TEST_DIAGNOSTICS
+    friend class Qwen3TTSDiagnostics;
+#endif
+
     enum class residency_component : uint32_t {
         none = 0,
         transformer = 1u << 0,
@@ -203,6 +216,9 @@ private:
     void stop_idle_worker();
     void idle_worker_main();
     bool offload_idle_components_locked(bool force_for_test = false, std::string * error = nullptr);
+    bool force_transformer_offload_for_test(std::string & error);
+    bool transformer_ram_offloaded_for_test() const;
+    bool force_idle_offload_once_for_test(std::string & error);
 
     TextTokenizer tokenizer_;
     TTSTransformer transformer_;
@@ -225,13 +241,27 @@ private:
     std::condition_variable idle_cv_;
     std::thread idle_worker_;
     bool idle_worker_shutdown_ = false;
-    bool operation_active_ = false;
+    uint32_t active_operations_ = 0;
     uint64_t idle_generation_ = 0;
     int gpu_offload_idle_secs_ = 0;
     bool gpu_idle_offload_enabled_ = false;
     bool logged_transformer_offload_ineligible_ = false;
     bool logged_decoder_offload_ineligible_ = false;
 };
+
+#ifdef QWEN3_TTS_ENABLE_TEST_DIAGNOSTICS
+inline bool Qwen3TTSDiagnostics::force_transformer_offload(Qwen3TTS & tts, std::string & error) {
+    return tts.force_transformer_offload_for_test(error);
+}
+
+inline bool Qwen3TTSDiagnostics::transformer_ram_offloaded(const Qwen3TTS & tts) {
+    return tts.transformer_ram_offloaded_for_test();
+}
+
+inline bool Qwen3TTSDiagnostics::force_idle_offload_once(Qwen3TTS & tts, std::string & error) {
+    return tts.force_idle_offload_once_for_test(error);
+}
+#endif
 
 // Utility: Load audio file (WAV format)
 bool load_audio_file(const std::string & path, std::vector<float> & samples, 
