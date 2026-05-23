@@ -64,6 +64,51 @@ static int run_download_rejects_unallocated_tensor() {
     return 0;
 }
 
+static int run_download_rejects_name_mismatch() {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    if (!backend) return fail("backend init failed");
+
+    ggml_init_params params = {
+        /*.mem_size   =*/ ggml_tensor_overhead() * 2,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        ggml_backend_free(backend);
+        return fail("ggml_init failed");
+    }
+
+    ggml_tensor * t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+    ggml_set_name(t, "real.weight");
+    std::map<std::string, ggml_tensor *> tensors;
+    tensors["wrong.weight"] = t;
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (!buffer) {
+        ggml_free(ctx);
+        ggml_backend_free(backend);
+        return fail("alloc buffer failed");
+    }
+
+    float input[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    ggml_backend_tensor_set(t, input, 0, sizeof(input));
+
+    qwen3_tts::host_tensor_store store;
+    std::string error;
+    const bool ok = qwen3_tts::download_tensors_to_host(tensors, store, error);
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+
+    if (ok) return fail("download accepted name mismatch");
+    if (error.find("name") == std::string::npos) return fail("download name mismatch error mismatch");
+    if (!store.tensors.empty()) return fail("download name mismatch left tensor copies");
+    if (store.total_bytes != 0) return fail("download name mismatch left total bytes");
+    return 0;
+}
+
 static int run_upload_rejects_missing_destination() {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     if (!backend) return fail("backend init failed");
@@ -114,6 +159,48 @@ static int run_upload_rejects_missing_destination() {
     ggml_free(ctx);
     ggml_backend_free(backend);
     return result;
+}
+
+static int run_upload_rejects_name_mismatch() {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    if (!backend) return fail("backend init failed");
+
+    ggml_init_params params = {
+        /*.mem_size   =*/ ggml_tensor_overhead() * 2,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        ggml_backend_free(backend);
+        return fail("ggml_init failed");
+    }
+
+    ggml_tensor * t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+    ggml_set_name(t, "real.weight");
+    std::map<std::string, ggml_tensor *> tensors;
+    tensors["wrong.weight"] = t;
+
+    qwen3_tts::host_tensor_store store;
+    qwen3_tts::host_tensor_copy copy;
+    copy.name = "wrong.weight";
+    copy.bytes.resize(4 * sizeof(float));
+    store.total_bytes = copy.bytes.size();
+    store.tensors.push_back(copy);
+
+    ggml_backend_buffer_t buffer = nullptr;
+    std::string error;
+    const bool ok = qwen3_tts::upload_tensors_from_host(ctx, tensors, backend, store, buffer, error);
+    const bool buffer_changed = buffer != nullptr;
+
+    if (buffer) ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+
+    if (ok) return fail("upload accepted name mismatch");
+    if (error.find("name") == std::string::npos) return fail("upload name mismatch error mismatch");
+    if (buffer_changed) return fail("upload name mismatch failure changed buffer");
+    return 0;
 }
 
 static int run_upload_rejects_non_null_buffer() {
@@ -463,7 +550,9 @@ static int run_backend_roundtrip(enum ggml_backend_dev_type type, bool optional)
 int main() {
     if (run_download_rejects_null_tensor() != 0) return 1;
     if (run_download_rejects_unallocated_tensor() != 0) return 1;
+    if (run_download_rejects_name_mismatch() != 0) return 1;
     if (run_upload_rejects_missing_destination() != 0) return 1;
+    if (run_upload_rejects_name_mismatch() != 0) return 1;
     if (run_upload_rejects_non_null_buffer() != 0) return 1;
     if (run_upload_rejects_wrong_context_tensor() != 0) return 1;
     if (run_upload_rejects_incomplete_store() != 0) return 1;

@@ -34,7 +34,8 @@ bool download_tensors_to_host(const std::map<std::string, ggml_tensor *> & tenso
                               std::string & error);
 
 // Allocates a new backend buffer for all tensors in ctx and uploads stored
-// tensor bytes into it.
+// tensor bytes into it. Tensor maps must be keyed by each tensor's GGML
+// metadata name.
 // Precondition: buffer must be nullptr on entry; callers own and must free any
 // previous backend buffer before reloading weights. Destination tensors must
 // belong to ctx. Destination names must map one-to-one to distinct tensor

@@ -62,6 +62,11 @@ bool tensor_belongs_to_context(ggml_context * ctx, const ggml_tensor * target) {
     return false;
 }
 
+bool tensor_name_matches_key(const std::string & key, const ggml_tensor * tensor) {
+    const char * name = ggml_get_name(tensor);
+    return name && name[0] != '\0' && key == name;
+}
+
 } // namespace
 
 void host_tensor_store::clear() {
@@ -89,6 +94,11 @@ bool download_tensors_to_host(const std::map<std::string, ggml_tensor *> & tenso
     for (const auto & entry : tensors) {
         if (!entry.second) {
             error = "Cannot download null tensor: " + entry.first;
+            out.clear();
+            return false;
+        }
+        if (!tensor_name_matches_key(entry.first, entry.second)) {
+            error = "Cannot download tensor with mismatched name: " + entry.first;
             out.clear();
             return false;
         }
@@ -189,6 +199,10 @@ bool upload_tensors_from_host(ggml_context * ctx,
         }
         if (!entry.second) {
             error = "Cannot upload to null tensor: " + entry.first;
+            return false;
+        }
+        if (!tensor_name_matches_key(entry.first, entry.second)) {
+            error = "Cannot upload tensor with mismatched name: " + entry.first;
             return false;
         }
         auto ptr_it = tensor_names_by_ptr.find(entry.second);
