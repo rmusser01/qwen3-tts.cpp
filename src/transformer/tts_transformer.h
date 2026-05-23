@@ -17,6 +17,8 @@
 
 namespace qwen3_tts {
 
+class Qwen3TTS;
+
 #ifdef QWEN3_TTS_TIMING
 struct tts_timing {
     // Prefill phase
@@ -336,6 +338,9 @@ public:
                             std::vector<float> & output);
     
 private:
+    friend class Qwen3TTS;
+
+    bool offload_weights_to_ram(std::string & error, bool require_supported_backend);
     bool require_weights_gpu_resident();
 
     bool try_init_coreml_code_predictor(const std::string & model_path);

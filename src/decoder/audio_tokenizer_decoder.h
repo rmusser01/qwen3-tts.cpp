@@ -12,6 +12,8 @@
 
 namespace qwen3_tts {
 
+class Qwen3TTS;
+
 // Audio tokenizer decoder (vocoder) configuration
 struct audio_decoder_config {
     int32_t sample_rate = 24000;
@@ -189,6 +191,10 @@ public:
     const std::string & get_error() const { return error_msg_; }
     
 private:
+    friend class Qwen3TTS;
+
+    bool offload_weights_to_ram(std::string & error, bool require_supported_backend);
+
     // Build computation graph for decoding
     struct ggml_cgraph * build_graph(int32_t n_frames);
     bool decode_single(const int32_t * codes, int32_t n_frames, int32_t position_offset,

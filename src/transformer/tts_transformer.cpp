@@ -190,6 +190,10 @@ bool TTSTransformer::can_offload_to_ram() const {
 }
 
 bool TTSTransformer::offload_weights_to_ram(std::string & error) {
+    return offload_weights_to_ram(error, true);
+}
+
+bool TTSTransformer::offload_weights_to_ram(std::string & error, bool require_supported_backend) {
     error.clear();
 
     if (model_.residency == weight_residency::RamResident) {
@@ -203,7 +207,7 @@ bool TTSTransformer::offload_weights_to_ram(std::string & error) {
         error = "Cannot offload transformer weights: model buffer is null";
         return false;
     }
-    if (!can_offload_to_ram()) {
+    if (require_supported_backend && !can_offload_to_ram()) {
         error = "Cannot offload transformer weights: backend does not support RAM offload";
         return false;
     }

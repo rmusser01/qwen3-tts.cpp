@@ -234,7 +234,19 @@ bool Qwen3TTS::offload_idle_components_locked(bool force_for_test, std::string *
 
     if (transformer_loaded_ && !transformer_.is_ram_offloaded()) {
         std::string component_error;
-        if (force_for_test || transformer_.can_offload_to_ram()) {
+        if (force_for_test) {
+            if (transformer_.offload_weights_to_ram(component_error, false)) {
+                fprintf(stderr, "  GPU idle RAM offload: transformer copied %s to host RAM\n",
+                        format_bytes((uint64_t) transformer_.ram_offloaded_bytes()).c_str());
+            } else {
+                ok = false;
+                fprintf(stderr, "  WARNING: GPU idle RAM offload failed for transformer: %s\n",
+                        component_error.c_str());
+                if (error && error->empty()) {
+                    *error = "Transformer idle RAM offload failed: " + component_error;
+                }
+            }
+        } else if (transformer_.can_offload_to_ram()) {
             if (transformer_.offload_weights_to_ram(component_error)) {
                 fprintf(stderr, "  GPU idle RAM offload: transformer copied %s to host RAM\n",
                         format_bytes((uint64_t) transformer_.ram_offloaded_bytes()).c_str());
@@ -254,7 +266,19 @@ bool Qwen3TTS::offload_idle_components_locked(bool force_for_test, std::string *
 
     if (decoder_loaded_ && !audio_decoder_.is_ram_offloaded()) {
         std::string component_error;
-        if (force_for_test || audio_decoder_.can_offload_to_ram()) {
+        if (force_for_test) {
+            if (audio_decoder_.offload_weights_to_ram(component_error, false)) {
+                fprintf(stderr, "  GPU idle RAM offload: decoder copied %s to host RAM\n",
+                        format_bytes((uint64_t) audio_decoder_.ram_offloaded_bytes()).c_str());
+            } else {
+                ok = false;
+                fprintf(stderr, "  WARNING: GPU idle RAM offload failed for decoder: %s\n",
+                        component_error.c_str());
+                if (error && error->empty()) {
+                    *error = "Decoder idle RAM offload failed: " + component_error;
+                }
+            }
+        } else if (audio_decoder_.can_offload_to_ram()) {
             if (audio_decoder_.offload_weights_to_ram(component_error)) {
                 fprintf(stderr, "  GPU idle RAM offload: decoder copied %s to host RAM\n",
                         format_bytes((uint64_t) audio_decoder_.ram_offloaded_bytes()).c_str());
@@ -282,7 +306,7 @@ bool Qwen3TTS::force_transformer_offload_for_test(std::string & error) {
         error = "Cannot force transformer RAM offload: transformer is not loaded";
         return false;
     }
-    return transformer_.offload_weights_to_ram(error);
+    return transformer_.offload_weights_to_ram(error, false);
 }
 
 bool Qwen3TTS::transformer_ram_offloaded_for_test() const {

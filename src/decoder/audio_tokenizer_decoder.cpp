@@ -441,6 +441,10 @@ bool AudioTokenizerDecoder::can_offload_to_ram() const {
 }
 
 bool AudioTokenizerDecoder::offload_weights_to_ram(std::string & error) {
+    return offload_weights_to_ram(error, true);
+}
+
+bool AudioTokenizerDecoder::offload_weights_to_ram(std::string & error, bool require_supported_backend) {
     error.clear();
 
     if (model_.residency == weight_residency::RamResident) {
@@ -454,7 +458,7 @@ bool AudioTokenizerDecoder::offload_weights_to_ram(std::string & error) {
         error = "Cannot offload decoder weights: model buffer is null";
         return false;
     }
-    if (!can_offload_to_ram()) {
+    if (require_supported_backend && !can_offload_to_ram()) {
         error = "Cannot offload decoder weights: backend does not support RAM offload";
         return false;
     }
