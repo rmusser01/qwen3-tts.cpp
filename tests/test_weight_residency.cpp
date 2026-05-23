@@ -14,9 +14,11 @@ static int fail(const char * msg) {
     return 1;
 }
 
-static int run_backend_roundtrip(enum ggml_backend_dev_type type) {
+static int run_backend_roundtrip(enum ggml_backend_dev_type type, bool optional) {
     ggml_backend_t backend = ggml_backend_init_by_type(type, nullptr);
-    if (!backend) return 0; // optional backend unavailable
+    if (!backend) {
+        return optional ? 0 : fail("backend init failed");
+    }
 
     ggml_init_params params = {
         /*.mem_size   =*/ ggml_tensor_overhead() * 2,
@@ -63,8 +65,8 @@ static int run_backend_roundtrip(enum ggml_backend_dev_type type) {
 }
 
 int main() {
-    if (run_backend_roundtrip(GGML_BACKEND_DEVICE_TYPE_CPU) != 0) return 1;
-    (void) run_backend_roundtrip(GGML_BACKEND_DEVICE_TYPE_GPU);
+    if (run_backend_roundtrip(GGML_BACKEND_DEVICE_TYPE_CPU, false) != 0) return 1;
+    if (run_backend_roundtrip(GGML_BACKEND_DEVICE_TYPE_GPU, true) != 0) return 1;
     std::printf("weight_residency tests passed\n");
     return 0;
 }
