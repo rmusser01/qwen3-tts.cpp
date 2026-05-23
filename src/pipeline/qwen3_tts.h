@@ -7,6 +7,7 @@
 #include "decoder/audio_tokenizer_decoder.h"
 
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -189,9 +190,10 @@ public:
     const std::string & get_error() const { return error_msg_; }
 
     // Check if models are loaded
-    bool is_loaded() const { return models_loaded_; }
+    bool is_loaded() const;
     
 private:
+    friend class guarded_operation;
 #ifdef QWEN3_TTS_ENABLE_TEST_DIAGNOSTICS
     friend class Qwen3TTSDiagnostics;
 #endif
@@ -202,23 +204,44 @@ private:
         decoder = 1u << 1,
     };
 
-    tts_result synthesize_internal(const std::string & text,
-                                   const float * speaker_embedding,
-                                   const tts_params & params,
-                                   tts_result & result,
-                                   const int32_t * ref_codes = nullptr,
-                                   int32_t n_ref_frames = 0);
+    struct model_metadata_snapshot {
+        std::string model_type;
+        std::string model_size;
+        bool has_speaker_encoder = false;
+        std::vector<std::string> speaker_names;
+        std::vector<int32_t> speaker_ids;
+        std::vector<std::string> speaker_dialects;
+    };
+
+    tts_result synthesize_with_voice_samples_unlocked(const std::string & text,
+                                                      const float * ref_samples,
+                                                      int32_t n_ref_samples,
+                                                      const tts_params & params,
+                                                      tts_result & result);
+    tts_result synthesize_internal_unlocked(const std::string & text,
+                                            const float * speaker_embedding,
+                                            const tts_params & params,
+                                            tts_result & result,
+                                            const int32_t * ref_codes = nullptr,
+                                            int32_t n_ref_frames = 0);
+    bool extract_speaker_embedding_unlocked(const float * ref_samples,
+                                            int32_t n_ref_samples,
+                                            std::vector<float> & embedding,
+                                            const tts_params & params);
 
     bool ensure_runtime_resident_locked(uint32_t required, std::string & error);
     void finish_guarded_operation_locked();
     void arm_idle_worker_locked();
     void start_idle_worker_locked();
+    void stop_idle_worker_locked(std::unique_lock<std::mutex> & lock);
     void stop_idle_worker();
     void idle_worker_main();
     bool offload_idle_components_locked(bool force_for_test = false, std::string * error = nullptr);
     bool force_transformer_offload_for_test(std::string & error);
     bool transformer_ram_offloaded_for_test() const;
     bool force_idle_offload_once_for_test(std::string & error);
+    void publish_metadata_snapshot_locked(std::shared_ptr<const model_metadata_snapshot> snapshot);
+    const model_metadata_snapshot & metadata_snapshot_locked() const;
 
     TextTokenizer tokenizer_;
     TTSTransformer transformer_;
@@ -236,7 +259,10 @@ private:
     std::string tts_model_path_;
     std::string decoder_model_path_;
     tts_progress_callback_t progress_callback_;
+    std::shared_ptr<const model_metadata_snapshot> metadata_snapshot_;
+    std::vector<std::shared_ptr<const model_metadata_snapshot>> retained_metadata_snapshots_;
 
+    std::mutex reload_mutex_;
     mutable std::mutex lifecycle_mutex_;
     std::condition_variable idle_cv_;
     std::thread idle_worker_;

@@ -174,6 +174,14 @@ target_link_libraries(test_encoder PRIVATE
     Threads::Threads
 )
 
+add_executable(test_audio_tokenizer_encoder_lifecycle
+    tests/test_audio_tokenizer_encoder_lifecycle.cpp
+)
+target_link_libraries(test_audio_tokenizer_encoder_lifecycle PRIVATE
+    audio_tokenizer_encoder
+    Threads::Threads
+)
+
 # Test executable for transformer
 add_executable(test_transformer
     tests/test_transformer.cpp
@@ -238,6 +246,10 @@ add_test(NAME weight_residency_test
 )
 add_test(NAME encoder_test
     COMMAND test_encoder --tokenizer models/qwen3-tts-0.6b-f16.gguf --audio clone.wav --reference reference/ref_audio_embedding.bin
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME audio_tokenizer_encoder_lifecycle_test
+    COMMAND test_audio_tokenizer_encoder_lifecycle
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 add_test(NAME transformer_test

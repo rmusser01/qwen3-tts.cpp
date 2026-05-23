@@ -6,6 +6,7 @@
 #include <cstring>
 #include <algorithm>
 #include <numeric>
+#include <utility>
 
 #define QWEN3_TTS_MAX_NODES 16384
 
@@ -127,6 +128,10 @@ static void compute_centered_window(float * window, int n_fft, int win_length) {
 AudioTokenizerEncoder::AudioTokenizerEncoder() = default;
 
 AudioTokenizerEncoder::~AudioTokenizerEncoder() {
+    unload_model();
+}
+
+void AudioTokenizerEncoder::unload_model() {
     free_speaker_encoder_model(model_);
     
     if (state_.sched) {
@@ -141,13 +146,22 @@ AudioTokenizerEncoder::~AudioTokenizerEncoder() {
         ggml_backend_free(state_.backend_cpu);
         state_.backend_cpu = nullptr;
     }
+    state_.compute_meta.clear();
+    state_ = speaker_encoder_state();
 }
 
 bool AudioTokenizerEncoder::load_model(const std::string & model_path) {
+    unload_model();
+
+    auto fail_load = [this](std::string error) {
+        unload_model();
+        error_msg_ = std::move(error);
+        return false;
+    };
+
     GGUFLoader loader;
     if (!loader.open(model_path)) {
-        error_msg_ = loader.get_error();
-        return false;
+        return fail_load(loader.get_error());
     }
     
     model_.config.sample_rate = loader.get_u32("qwen3-tts.speaker_encoder.sample_rate", 24000);
@@ -163,8 +177,7 @@ bool AudioTokenizerEncoder::load_model(const std::string & model_path) {
     }
     
     if (spk_tensor_count == 0) {
-        error_msg_ = "No speaker encoder tensors found in model";
-        return false;
+        return fail_load("No speaker encoder tensors found in model");
     }
     
     size_t ctx_size = ggml_tensor_overhead() * spk_tensor_count;
@@ -176,8 +189,7 @@ bool AudioTokenizerEncoder::load_model(const std::string & model_path) {
     
     model_.ctx = ggml_init(params);
     if (!model_.ctx) {
-        error_msg_ = "Failed to initialize GGML context";
-        return false;
+        return fail_load("Failed to initialize GGML context");
     }
     
     struct gguf_context * gguf_ctx = loader.get_ctx();
@@ -250,12 +262,12 @@ bool AudioTokenizerEncoder::load_model(const std::string & model_path) {
     
     if (!load_tensor_data_from_file(model_path, gguf_ctx, model_.ctx, 
                                      model_.tensors, model_.buffer, error_msg_)) {
-        return false;
+        return fail_load(error_msg_);
     }
     
     state_.backend = init_preferred_backend("AudioTokenizerEncoder", &error_msg_);
     if (!state_.backend) {
-        return false;
+        return fail_load(error_msg_);
     }
     ggml_backend_dev_t device = ggml_backend_get_device(state_.backend);
     const char * device_name = device ? ggml_backend_dev_name(device) : "Unknown";
@@ -264,8 +276,7 @@ bool AudioTokenizerEncoder::load_model(const std::string & model_path) {
     if (device && ggml_backend_dev_type(device) != GGML_BACKEND_DEVICE_TYPE_CPU) {
         state_.backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
         if (!state_.backend_cpu) {
-            error_msg_ = "Failed to initialize CPU fallback backend for AudioTokenizerEncoder";
-            return false;
+            return fail_load("Failed to initialize CPU fallback backend for AudioTokenizerEncoder");
         }
     }
 
@@ -276,8 +287,7 @@ bool AudioTokenizerEncoder::load_model(const std::string & model_path) {
     }
     state_.sched = ggml_backend_sched_new(backends.data(), nullptr, (int)backends.size(), QWEN3_TTS_MAX_NODES, false, true);
     if (!state_.sched) {
-        error_msg_ = "Failed to create backend scheduler";
-        return false;
+        return fail_load("Failed to create backend scheduler");
     }
     
     state_.compute_meta.resize(ggml_tensor_overhead() * QWEN3_TTS_MAX_NODES + ggml_graph_overhead());
@@ -702,7 +712,7 @@ struct ggml_cgraph * AudioTokenizerEncoder::build_graph(int32_t n_frames) {
 
 bool AudioTokenizerEncoder::encode(const float * samples, int32_t n_samples,
                                     std::vector<float> & embedding) {
-    if (!model_.ctx) {
+    if (!model_.ctx || !state_.backend || !state_.sched) {
         error_msg_ = "Model not loaded";
         return false;
     }
@@ -766,6 +776,7 @@ void free_speaker_encoder_model(speaker_encoder_model & model) {
         model.ctx = nullptr;
     }
     model.tensors.clear();
+    model = speaker_encoder_model();
 }
 
 } // namespace qwen3_tts
