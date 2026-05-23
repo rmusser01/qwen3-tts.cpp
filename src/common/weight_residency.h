@@ -32,6 +32,10 @@ bool backend_is_cuda_or_vulkan(ggml_backend_t backend);
 bool download_tensors_to_host(const std::map<std::string, ggml_tensor *> & tensors,
                               host_tensor_store & out,
                               std::string & error);
+
+// Allocates a new backend buffer and uploads stored tensor bytes into it.
+// Precondition: buffer must be nullptr on entry; callers own and must free any
+// previous backend buffer before reloading weights.
 bool upload_tensors_from_host(ggml_context * ctx,
                               const std::map<std::string, ggml_tensor *> & tensors,
                               ggml_backend_t backend,

@@ -1,6 +1,7 @@
 #include "common/weight_residency.h"
 
 #include <cctype>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -94,6 +95,11 @@ bool download_tensors_to_host(const std::map<std::string, ggml_tensor *> & tenso
             ggml_backend_tensor_get(tensor, copy.bytes.data(), 0, nbytes);
         }
 
+        if (nbytes > std::numeric_limits<size_t>::max() - out.total_bytes) {
+            error = "Host tensor store byte count overflow";
+            out.clear();
+            return false;
+        }
         out.total_bytes += nbytes;
         out.tensors.push_back(std::move(copy));
     }
@@ -109,6 +115,10 @@ bool upload_tensors_from_host(ggml_context * ctx,
                               std::string & error) {
     error.clear();
 
+    if (buffer) {
+        error = "Cannot upload tensors: destination buffer must be null";
+        return false;
+    }
     if (!ctx) {
         error = "Cannot upload tensors: ggml context is null";
         return false;
