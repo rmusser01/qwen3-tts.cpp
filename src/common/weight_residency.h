@@ -37,8 +37,9 @@ bool download_tensors_to_host(const std::map<std::string, ggml_tensor *> & tenso
 // tensor bytes into it.
 // Precondition: buffer must be nullptr on entry; callers own and must free any
 // previous backend buffer before reloading weights. Destination tensors must
-// belong to ctx. The host store must contain exactly one copy for every
-// destination tensor in tensors, and tensors must cover every tensor in ctx.
+// belong to ctx. Destination names must map one-to-one to distinct tensor
+// pointers. The host store must contain exactly one copy for every destination
+// tensor in tensors, and tensors must cover every tensor in ctx.
 bool upload_tensors_from_host(ggml_context * ctx,
                               const std::map<std::string, ggml_tensor *> & tensors,
                               ggml_backend_t backend,

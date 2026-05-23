@@ -180,6 +180,7 @@ bool upload_tensors_from_host(ggml_context * ctx,
         }
     }
 
+    std::map<ggml_tensor *, std::string> tensor_names_by_ptr;
     for (const auto & entry : tensors) {
         auto copy_it = store_by_name.find(entry.first);
         if (copy_it == store_by_name.end()) {
@@ -190,6 +191,14 @@ bool upload_tensors_from_host(ggml_context * ctx,
             error = "Cannot upload to null tensor: " + entry.first;
             return false;
         }
+        auto ptr_it = tensor_names_by_ptr.find(entry.second);
+        if (ptr_it != tensor_names_by_ptr.end()) {
+            error = "Cannot upload duplicate destination tensor alias: "
+                + ptr_it->second + " and " + entry.first;
+            return false;
+        }
+        tensor_names_by_ptr[entry.second] = entry.first;
+
         if (!tensor_belongs_to_context(ctx, entry.second)) {
             error = "Cannot upload tensor from a different context: " + entry.first;
             return false;
