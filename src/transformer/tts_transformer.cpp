@@ -1,4 +1,5 @@
 #include "transformer/tts_transformer.h"
+#include "common/backend_threads.h"
 #include "common/gguf_loader.h"
 
 #include <cmath>
@@ -168,6 +169,7 @@ bool TTSTransformer::load_model(const std::string & model_path) {
             error_msg_ = "Failed to initialize CPU fallback backend for TTSTransformer";
             return false;
         }
+        apply_backend_n_threads(state_.backend_cpu, get_default_backend_n_threads());
     }
     
     if (!create_transformer_scheduler(state_, error_msg_)) {
@@ -301,6 +303,21 @@ bool TTSTransformer::require_weights_gpu_resident() {
         return false;
     }
     return true;
+}
+
+bool TTSTransformer::set_n_threads(int32_t n_threads) {
+    if (n_threads <= 0) {
+        return false;
+    }
+
+    bool applied = false;
+    if (state_.backend) {
+        applied = apply_backend_n_threads(state_.backend, n_threads) || applied;
+    }
+    if (state_.backend_cpu) {
+        applied = apply_backend_n_threads(state_.backend_cpu, n_threads) || applied;
+    }
+    return applied;
 }
 
 bool TTSTransformer::try_init_coreml_code_predictor(const std::string & model_path) {
