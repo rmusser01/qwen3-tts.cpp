@@ -3018,7 +3018,8 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
                                const int32_t * ref_text_tokens,
                                int32_t n_ref_text_tokens,
                                const int32_t * ref_codes,
-                               int32_t n_ref_frames) {
+                               int32_t n_ref_frames,
+                               bool print_timing) {
     if (!require_weights_gpu_resident()) {
         return false;
     }
@@ -3256,6 +3257,10 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
     timing.t_generate_total_ms = std::chrono::duration<double, std::milli>(clk::now() - t_gen_start).count();
     last_timing_ = timing;
     has_last_timing_ = true;
+    if (!print_timing) {
+        return true;
+    }
+
     const auto & t = timing;
     int nf = t.n_frames;
     fprintf(stderr, "\n=== Detailed Generation Timing (%d frames) ===\n", nf);
