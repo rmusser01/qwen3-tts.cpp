@@ -707,6 +707,8 @@ bool Qwen3TTS::prepare_icl_prompt_from_samples(const float * ref_samples,
 
     icl_prompt prepared;
     prepared.ref_text = reference_text;
+    prepared.expected_hidden_size = transformer_.get_config().hidden_size;
+    prepared.expected_n_codebooks = transformer_.get_config().n_codebooks;
     if (!audio_encoder_.encode(ref_samples, n_ref_samples, prepared.speaker_embedding)) {
         error_msg_ = "Failed to extract speaker embedding: " + audio_encoder_.get_error();
         return false;
@@ -799,11 +801,43 @@ tts_result Qwen3TTS::synthesize_with_icl_prompt_unlocked(const std::string & tex
         return result;
     }
 
+    const int32_t hidden_size = transformer_.get_config().hidden_size;
+    if (prompt.expected_hidden_size > 0 && prompt.expected_hidden_size != hidden_size) {
+        result.error_msg = "Invalid prepared ICL prompt: hidden_size mismatch: expected " +
+                           std::to_string(hidden_size) + " but prompt was prepared for " +
+                           std::to_string(prompt.expected_hidden_size);
+        return result;
+    }
+    if ((int32_t) prompt.speaker_embedding.size() != hidden_size) {
+        result.error_msg = "Invalid prepared ICL prompt: speaker embedding size mismatch: expected " +
+                           std::to_string(hidden_size) + " but got " +
+                           std::to_string(prompt.speaker_embedding.size());
+        return result;
+    }
+
+    const int32_t n_codebooks = transformer_.get_config().n_codebooks;
+    if (prompt.expected_n_codebooks > 0 && prompt.expected_n_codebooks != n_codebooks) {
+        result.error_msg = "Invalid prepared ICL prompt: n_codebooks mismatch: expected " +
+                           std::to_string(n_codebooks) + " but prompt was prepared for " +
+                           std::to_string(prompt.expected_n_codebooks);
+        return result;
+    }
+
     tts_params prompt_params = params;
     prompt_params.ref_text = prompt.ref_text;
     const bool has_ref_codes = !prompt.ref_text.empty() &&
                                prompt.n_ref_frames > 0 &&
                                !prompt.ref_codes.empty();
+    if (has_ref_codes) {
+        const size_t expected_codes = (size_t) prompt.n_ref_frames * (size_t) n_codebooks;
+        if (prompt.ref_codes.size() != expected_codes) {
+            result.error_msg = "Invalid prepared ICL prompt: reference code count mismatch: expected " +
+                               std::to_string(expected_codes) + " but got " +
+                               std::to_string(prompt.ref_codes.size());
+            return result;
+        }
+    }
+
     return synthesize_internal_unlocked(text,
                                         prompt.speaker_embedding.data(),
                                         prompt_params,
