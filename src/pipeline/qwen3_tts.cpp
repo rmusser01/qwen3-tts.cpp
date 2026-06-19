@@ -384,6 +384,7 @@ void Qwen3TTS::set_n_threads(int32_t n_threads) {
         return;
     }
 
+    n_threads_ = n_threads;
     set_default_backend_n_threads(n_threads);
     apply_default_backend_threads_to_preferred_backend();
     transformer_.set_n_threads(n_threads);
@@ -392,11 +393,16 @@ void Qwen3TTS::set_n_threads(int32_t n_threads) {
     audio_decoder_.set_n_threads(n_threads);
 }
 
+int32_t Qwen3TTS::effective_n_threads(const tts_params & params) const {
+    return params.n_threads > 0 ? params.n_threads : n_threads_;
+}
+
 bool Qwen3TTS::load_models(const std::string & model_dir,
                            const std::string & tts_model,
                            const std::string & tokenizer_model) {
     std::lock_guard<std::mutex> reload_lock(reload_mutex_);
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    set_n_threads(n_threads_);
 
     models_loaded_ = false;
     publish_metadata_snapshot_locked(std::make_shared<model_metadata_snapshot>());
@@ -604,9 +610,7 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
     tts_result result;
 
-    if (params.n_threads > 0) {
-        set_n_threads(params.n_threads);
-    }
+    set_n_threads(effective_n_threads(params));
     
     if (!models_loaded_) {
         result.error_msg = "Models not loaded";
@@ -704,9 +708,7 @@ bool Qwen3TTS::extract_speaker_embedding(const float * ref_samples, int32_t n_re
                                           std::vector<float> & embedding,
                                           const tts_params & params) {
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-    if (params.n_threads > 0) {
-        set_n_threads(params.n_threads);
-    }
+    set_n_threads(effective_n_threads(params));
 
     if (!models_loaded_) {
         error_msg_ = "Models not loaded";
@@ -794,9 +796,7 @@ tts_result Qwen3TTS::synthesize_internal_unlocked(const std::string & text,
                                                    tts_result & result,
                                                    const int32_t * ref_codes,
                                                    int32_t n_ref_frames) {
-    if (params.n_threads > 0) {
-        set_n_threads(params.n_threads);
-    }
+    set_n_threads(effective_n_threads(params));
 
     int64_t t_total_start = get_time_ms();
     auto sample_memory = [&](const char * stage) {

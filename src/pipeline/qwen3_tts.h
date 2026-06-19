@@ -225,6 +225,8 @@ private:
         std::vector<std::string> speaker_dialects;
     };
 
+    int32_t effective_n_threads(const tts_params & params) const;
+
     tts_result synthesize_with_voice_samples_unlocked(const std::string & text,
                                                       const float * ref_samples,
                                                       int32_t n_ref_samples,
@@ -268,6 +270,7 @@ private:
     bool transformer_loaded_ = false;
     bool decoder_loaded_ = false;
     bool low_mem_mode_ = false;
+    int32_t n_threads_ = 4;
     std::string error_msg_;
     std::string tts_model_path_;
     std::string decoder_model_path_;
