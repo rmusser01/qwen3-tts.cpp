@@ -270,6 +270,7 @@ private:
                                                   const icl_prompt & prompt,
                                                   const tts_params & params,
                                                   tts_result & result);
+    bool validate_icl_prompt_unlocked(const icl_prompt & prompt, std::string & error) const;
     tts_result synthesize_internal_unlocked(const std::string & text,
                                             const float * speaker_embedding,
                                             const tts_params & params,

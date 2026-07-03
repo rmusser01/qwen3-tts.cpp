@@ -788,6 +788,13 @@ tts_result Qwen3TTS::synthesize_with_icl_prompt(const std::string & text,
     const int32_t call_n_threads = effective_n_threads(params);
     apply_n_threads(call_n_threads);
     tts_result result;
+
+    std::string prompt_error;
+    if (!validate_icl_prompt_unlocked(prompt, prompt_error)) {
+        result.error_msg = prompt_error;
+        return result;
+    }
+
     if (!models_loaded_) {
         result.error_msg = "Models not loaded";
         return result;
@@ -809,30 +816,9 @@ tts_result Qwen3TTS::synthesize_with_icl_prompt_unlocked(const std::string & tex
                                                          const icl_prompt & prompt,
                                                          const tts_params & params,
                                                          tts_result & result) {
-    if (prompt.speaker_embedding.empty()) {
-        result.error_msg = "Invalid prepared ICL prompt: missing speaker embedding";
-        return result;
-    }
-
-    const int32_t hidden_size = transformer_.get_config().hidden_size;
-    if (prompt.expected_hidden_size > 0 && prompt.expected_hidden_size != hidden_size) {
-        result.error_msg = "Invalid prepared ICL prompt: hidden_size mismatch: expected " +
-                           std::to_string(hidden_size) + " but prompt was prepared for " +
-                           std::to_string(prompt.expected_hidden_size);
-        return result;
-    }
-    if ((int32_t) prompt.speaker_embedding.size() != hidden_size) {
-        result.error_msg = "Invalid prepared ICL prompt: speaker embedding size mismatch: expected " +
-                           std::to_string(hidden_size) + " but got " +
-                           std::to_string(prompt.speaker_embedding.size());
-        return result;
-    }
-
-    const int32_t n_codebooks = transformer_.get_config().n_codebooks;
-    if (prompt.expected_n_codebooks > 0 && prompt.expected_n_codebooks != n_codebooks) {
-        result.error_msg = "Invalid prepared ICL prompt: n_codebooks mismatch: expected " +
-                           std::to_string(n_codebooks) + " but prompt was prepared for " +
-                           std::to_string(prompt.expected_n_codebooks);
+    std::string prompt_error;
+    if (!validate_icl_prompt_unlocked(prompt, prompt_error)) {
+        result.error_msg = prompt_error;
         return result;
     }
 
@@ -841,15 +827,6 @@ tts_result Qwen3TTS::synthesize_with_icl_prompt_unlocked(const std::string & tex
     const bool has_ref_codes = !prompt.ref_text.empty() &&
                                prompt.n_ref_frames > 0 &&
                                !prompt.ref_codes.empty();
-    if (has_ref_codes) {
-        const size_t expected_codes = (size_t) prompt.n_ref_frames * (size_t) n_codebooks;
-        if (prompt.ref_codes.size() != expected_codes) {
-            result.error_msg = "Invalid prepared ICL prompt: reference code count mismatch: expected " +
-                               std::to_string(expected_codes) + " but got " +
-                               std::to_string(prompt.ref_codes.size());
-            return result;
-        }
-    }
 
     return synthesize_internal_unlocked(text,
                                         prompt.speaker_embedding.data(),
@@ -857,6 +834,50 @@ tts_result Qwen3TTS::synthesize_with_icl_prompt_unlocked(const std::string & tex
                                         result,
                                         has_ref_codes ? prompt.ref_codes.data() : nullptr,
                                         has_ref_codes ? prompt.n_ref_frames : 0);
+}
+
+bool Qwen3TTS::validate_icl_prompt_unlocked(const icl_prompt & prompt, std::string & error) const {
+    if (prompt.speaker_embedding.empty()) {
+        error = "Invalid prepared ICL prompt: missing speaker embedding";
+        return false;
+    }
+
+    const int32_t hidden_size = transformer_.get_config().hidden_size;
+    if (prompt.expected_hidden_size > 0 && prompt.expected_hidden_size != hidden_size) {
+        error = "Invalid prepared ICL prompt: hidden_size mismatch: expected " +
+                std::to_string(hidden_size) + " but prompt was prepared for " +
+                std::to_string(prompt.expected_hidden_size);
+        return false;
+    }
+    if ((int32_t) prompt.speaker_embedding.size() != hidden_size) {
+        error = "Invalid prepared ICL prompt: speaker embedding size mismatch: expected " +
+                std::to_string(hidden_size) + " but got " +
+                std::to_string(prompt.speaker_embedding.size());
+        return false;
+    }
+
+    const int32_t n_codebooks = transformer_.get_config().n_codebooks;
+    if (prompt.expected_n_codebooks > 0 && prompt.expected_n_codebooks != n_codebooks) {
+        error = "Invalid prepared ICL prompt: n_codebooks mismatch: expected " +
+                std::to_string(n_codebooks) + " but prompt was prepared for " +
+                std::to_string(prompt.expected_n_codebooks);
+        return false;
+    }
+
+    const bool has_ref_codes = !prompt.ref_text.empty() &&
+                               prompt.n_ref_frames > 0 &&
+                               !prompt.ref_codes.empty();
+    if (has_ref_codes) {
+        const size_t expected_codes = (size_t) prompt.n_ref_frames * (size_t) n_codebooks;
+        if (prompt.ref_codes.size() != expected_codes) {
+            error = "Invalid prepared ICL prompt: reference code count mismatch: expected " +
+                    std::to_string(expected_codes) + " but got " +
+                    std::to_string(prompt.ref_codes.size());
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool Qwen3TTS::extract_speaker_embedding(const float * ref_samples, int32_t n_ref_samples,
