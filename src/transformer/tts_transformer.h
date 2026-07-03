@@ -316,17 +316,25 @@ public:
                   const int32_t * ref_text_tokens = nullptr,
                   int32_t n_ref_text_tokens = 0,
                   const int32_t * ref_codes = nullptr,
-                  int32_t n_ref_frames = 0);
+                  int32_t n_ref_frames = 0,
+                  bool print_timing = true);
     
     const tts_transformer_config & get_config() const { return model_.config; }
 
     const std::string & get_error() const { return error_msg_; }
+
+#ifdef QWEN3_TTS_TIMING
+    const tts_timing * last_timing() const;
+#endif
 
     // Set RNG seed for reproducible output
     void set_seed(uint32_t seed) { rng_.seed(seed); }
 
     // Force f32 accumulation in matmul (improves quality on some GPUs, default: on)
     void set_f32_acc(bool v) { f32_acc_ = v; }
+
+    // Apply thread count to loaded GGML backends where supported.
+    bool set_n_threads(int32_t n_threads);
     
     // Legacy interface for compatibility
     bool forward(const int32_t * tokens, int32_t n_tokens, int32_t n_past,
@@ -409,6 +417,8 @@ private:
 
 #ifdef QWEN3_TTS_TIMING
     tts_timing * timing_ = nullptr;
+    tts_timing last_timing_ = {};
+    bool has_last_timing_ = false;
 #endif
 };
 

@@ -45,8 +45,8 @@ struct tts_params {
     // Top-k sampling (0 = disabled)
     int32_t top_k = 50;
     
-    // Number of threads
-    int32_t n_threads = 4;
+    // Number of threads. 0 means use the engine's configured default.
+    int32_t n_threads = 0;
     
     // Print progress during generation
     bool print_progress = false;
@@ -107,11 +107,26 @@ struct tts_result {
     uint64_t mem_phys_start_bytes = 0;
     uint64_t mem_phys_end_bytes = 0;
     uint64_t mem_phys_peak_bytes = 0;
+
+#ifdef QWEN3_TTS_TIMING
+    bool has_detailed_timing = false;
+    tts_timing detailed_timing = {};
+#endif
     
 };
 
 // Progress callback type
 using tts_progress_callback_t = std::function<void(int tokens_generated, int max_tokens)>;
+
+// Prepared prompt state for voice cloning / ICL reuse.
+struct icl_prompt {
+    std::vector<float> speaker_embedding;
+    std::vector<int32_t> ref_codes;
+    int32_t n_ref_frames = 0;
+    int32_t expected_hidden_size = 0;
+    int32_t expected_n_codebooks = 0;
+    std::string ref_text;
+};
 
 // Main TTS class that orchestrates the full pipeline
 class Qwen3TTS {
@@ -148,6 +163,17 @@ public:
     tts_result synthesize_with_voice(const std::string & text,
                                       const float * ref_samples, int32_t n_ref_samples,
                                       const tts_params & params = tts_params());
+
+    // Prepare reusable voice cloning / ICL prompt state from reference audio.
+    bool prepare_icl_prompt(const std::string & reference_audio,
+                            const std::string & reference_text,
+                            const tts_params & params,
+                            icl_prompt & out);
+
+    // Generate speech using previously prepared prompt state.
+    tts_result synthesize_with_icl_prompt(const std::string & text,
+                                          const icl_prompt & prompt,
+                                          const tts_params & params = tts_params());
     
     // Extract speaker embedding from raw audio samples (for caching)
     // ref_samples: 24kHz mono float32 normalized to [-1, 1]
@@ -166,6 +192,12 @@ public:
 
     // Set progress callback
     void set_progress_callback(tts_progress_callback_t callback);
+
+    // Set default backend thread count and apply it to loaded backends where supported.
+    void set_n_threads(int32_t n_threads);
+
+    // Get the configured default backend thread count.
+    int32_t get_n_threads() const { return n_threads_; }
 
     // Model metadata
     const std::string & get_model_type() const;  // "base" | "custom_voice" | "voice_design"
@@ -189,6 +221,12 @@ public:
 
     // Get error message
     const std::string & get_error() const { return error_msg_; }
+
+    const std::string & get_tts_model_path() const { return tts_model_path_; }
+    const std::string & get_speaker_encoder_model_path() const { return tts_model_path_; }
+    const std::string & get_codec_encoder_model_path() const { return decoder_model_path_; }
+    const std::string & get_tokenizer_decoder_model_path() const { return decoder_model_path_; }
+    const std::string & get_decoder_model_path() const { return decoder_model_path_; }
 
     // Check if models are loaded
     bool is_loaded() const;
@@ -214,11 +252,25 @@ private:
         std::vector<std::string> speaker_dialects;
     };
 
+    int32_t effective_n_threads(const tts_params & params) const;
+    void apply_n_threads(int32_t n_threads);
+
+    bool prepare_icl_prompt_from_samples(const float * ref_samples,
+                                         int32_t n_ref_samples,
+                                         const std::string & reference_text,
+                                         const tts_params & params,
+                                         icl_prompt & out);
+
     tts_result synthesize_with_voice_samples_unlocked(const std::string & text,
                                                       const float * ref_samples,
                                                       int32_t n_ref_samples,
                                                       const tts_params & params,
                                                       tts_result & result);
+    tts_result synthesize_with_icl_prompt_unlocked(const std::string & text,
+                                                  const icl_prompt & prompt,
+                                                  const tts_params & params,
+                                                  tts_result & result);
+    bool validate_icl_prompt_unlocked(const icl_prompt & prompt, std::string & error) const;
     tts_result synthesize_internal_unlocked(const std::string & text,
                                             const float * speaker_embedding,
                                             const tts_params & params,
@@ -257,6 +309,7 @@ private:
     bool transformer_loaded_ = false;
     bool decoder_loaded_ = false;
     bool low_mem_mode_ = false;
+    int32_t n_threads_ = 4;
     std::string error_msg_;
     std::string tts_model_path_;
     std::string decoder_model_path_;

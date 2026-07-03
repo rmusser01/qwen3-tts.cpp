@@ -52,6 +52,10 @@ struct Qwen3Tts {
     std::string last_error;
 };
 
+struct Qwen3TtsIclPrompt {
+    qwen3_tts::icl_prompt prompt;
+};
+
 // Helper: convert C params to C++ params
 static qwen3_tts::tts_params to_cpp_params(const Qwen3TtsParams * p) {
     qwen3_tts::tts_params params;
@@ -93,7 +97,7 @@ void qwen3_tts_default_params(Qwen3TtsParams * params) {
     params->temperature       = 0.9f;
     params->top_p             = 1.0f;
     params->top_k             = 50;
-    params->n_threads         = 4;
+    params->n_threads         = 0; // use handle default unless caller overrides
     params->repetition_penalty = 1.05f;
     params->language_id       = 2050; // en
 }
@@ -101,7 +105,9 @@ void qwen3_tts_default_params(Qwen3TtsParams * params) {
 Qwen3Tts * qwen3_tts_create(const char * model_dir, int32_t n_threads) {
     if (!model_dir) return nullptr;
     auto * tts = new Qwen3Tts;
-    (void)n_threads; // thread count is set per-call via params
+    if (n_threads > 0) {
+        tts->engine.set_n_threads(n_threads);
+    }
     if (!tts->engine.load_models(model_dir)) {
         tts->last_error = tts->engine.get_error();
         delete tts;
@@ -245,7 +251,19 @@ Qwen3TtsAudio * qwen3_tts_synthesize_icl_file(
         const char * reference_audio_path,
         const char * reference_text,
         const Qwen3TtsParams * params) {
-    if (!tts || !text || !reference_audio_path || !reference_text) return nullptr;
+    if (!tts) return nullptr;
+    if (!text) {
+        tts->last_error = "Invalid argument: text is null";
+        return nullptr;
+    }
+    if (!reference_audio_path) {
+        tts->last_error = "Invalid argument: reference_audio_path is null";
+        return nullptr;
+    }
+    if (!reference_text) {
+        tts->last_error = "Invalid argument: reference_text is null";
+        return nullptr;
+    }
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
     cpp_params.ref_text = reference_text;
@@ -256,6 +274,61 @@ Qwen3TtsAudio * qwen3_tts_synthesize_icl_file(
     auto * out = to_c_audio(result);
     AUTORELEASE_END
     return out;
+}
+
+Qwen3TtsIclPrompt * qwen3_tts_prepare_icl_prompt_file(
+        Qwen3Tts * tts,
+        const char * reference_audio_path,
+        const char * reference_text,
+        const Qwen3TtsParams * params) {
+    if (!tts) return nullptr;
+    if (!reference_audio_path) {
+        tts->last_error = "Invalid argument: reference_audio_path is null";
+        return nullptr;
+    }
+    if (!reference_text) {
+        tts->last_error = "Invalid argument: reference_text is null";
+        return nullptr;
+    }
+    AUTORELEASE_BEGIN
+    auto cpp_params = to_cpp_params(params);
+    auto * out = new Qwen3TtsIclPrompt;
+    if (!tts->engine.prepare_icl_prompt(reference_audio_path, reference_text, cpp_params, out->prompt)) {
+        tts->last_error = tts->engine.get_error();
+        delete out;
+        out = nullptr;
+    }
+    AUTORELEASE_END
+    return out;
+}
+
+Qwen3TtsAudio * qwen3_tts_synthesize_with_icl_prompt(
+        Qwen3Tts * tts,
+        const char * text,
+        const Qwen3TtsIclPrompt * prompt,
+        const Qwen3TtsParams * params) {
+    if (!tts) return nullptr;
+    if (!text) {
+        tts->last_error = "Invalid argument: text is null";
+        return nullptr;
+    }
+    if (!prompt) {
+        tts->last_error = "Invalid argument: prompt is null";
+        return nullptr;
+    }
+    AUTORELEASE_BEGIN
+    auto cpp_params = to_cpp_params(params);
+    auto result = tts->engine.synthesize_with_icl_prompt(text, prompt->prompt, cpp_params);
+    if (!result.success) {
+        tts->last_error = result.error_msg;
+    }
+    auto * out = to_c_audio(result);
+    AUTORELEASE_END
+    return out;
+}
+
+void qwen3_tts_free_icl_prompt(Qwen3TtsIclPrompt * prompt) {
+    delete prompt;
 }
 
 const char * qwen3_tts_get_error(const Qwen3Tts * tts) {
@@ -271,6 +344,26 @@ const char * qwen3_tts_model_type(const Qwen3Tts * tts) {
 const char * qwen3_tts_model_size(const Qwen3Tts * tts) {
     if (!tts) return "";
     return tts->engine.get_model_size().c_str();
+}
+
+const char * qwen3_tts_tts_model_path(const Qwen3Tts * tts) {
+    if (!tts) return "";
+    return tts->engine.get_tts_model_path().c_str();
+}
+
+const char * qwen3_tts_speaker_encoder_model_path(const Qwen3Tts * tts) {
+    if (!tts) return "";
+    return tts->engine.get_speaker_encoder_model_path().c_str();
+}
+
+const char * qwen3_tts_codec_encoder_model_path(const Qwen3Tts * tts) {
+    if (!tts) return "";
+    return tts->engine.get_codec_encoder_model_path().c_str();
+}
+
+const char * qwen3_tts_tokenizer_decoder_model_path(const Qwen3Tts * tts) {
+    if (!tts) return "";
+    return tts->engine.get_tokenizer_decoder_model_path().c_str();
 }
 
 int qwen3_tts_has_speaker_encoder(const Qwen3Tts * tts) {

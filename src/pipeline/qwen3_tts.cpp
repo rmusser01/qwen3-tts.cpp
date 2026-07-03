@@ -1,4 +1,5 @@
 #include "pipeline/qwen3_tts.h"
+#include "common/backend_threads.h"
 #include "common/gguf_loader.h"
 #include "common/gpu_offload_policy.h"
 
@@ -378,11 +379,38 @@ const Qwen3TTS::model_metadata_snapshot & Qwen3TTS::metadata_snapshot_locked() c
     return empty;
 }
 
+void Qwen3TTS::set_n_threads(int32_t n_threads) {
+    if (n_threads <= 0) {
+        return;
+    }
+
+    n_threads_ = n_threads;
+    set_default_backend_n_threads(n_threads);
+    apply_default_backend_threads_to_preferred_backend();
+    apply_n_threads(n_threads);
+}
+
+void Qwen3TTS::apply_n_threads(int32_t n_threads) {
+    if (n_threads <= 0) {
+        return;
+    }
+
+    transformer_.set_n_threads(n_threads);
+    audio_encoder_.set_n_threads(n_threads);
+    codec_encoder_.set_n_threads(n_threads);
+    audio_decoder_.set_n_threads(n_threads);
+}
+
+int32_t Qwen3TTS::effective_n_threads(const tts_params & params) const {
+    return params.n_threads > 0 ? params.n_threads : n_threads_;
+}
+
 bool Qwen3TTS::load_models(const std::string & model_dir,
                            const std::string & tts_model,
                            const std::string & tokenizer_model) {
     std::lock_guard<std::mutex> reload_lock(reload_mutex_);
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    set_n_threads(n_threads_);
 
     models_loaded_ = false;
     publish_metadata_snapshot_locked(std::make_shared<model_metadata_snapshot>());
@@ -570,7 +598,7 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
         result.error_msg = "Failed to load reference audio: " + reference_audio;
         return result;
     }
-    
+
     const int target_rate = 24000;
     if (ref_sample_rate != target_rate) {
         fprintf(stderr, "Resampling audio from %d Hz to %d Hz...\n", ref_sample_rate, target_rate);
@@ -589,9 +617,14 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const tts_params & params) {
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
     tts_result result;
-    
+
     if (!models_loaded_) {
         result.error_msg = "Models not loaded";
+        return result;
+    }
+
+    if (!ref_samples || n_ref_samples <= 0) {
+        result.error_msg = "Invalid reference audio samples";
         return result;
     }
 
@@ -607,85 +640,253 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
     return synthesize_with_voice_samples_unlocked(text, ref_samples, n_ref_samples, params, result);
 }
 
-tts_result Qwen3TTS::synthesize_with_voice_samples_unlocked(const std::string & text,
-                                                             const float * ref_samples,
-                                                             int32_t n_ref_samples,
-                                                             const tts_params & params,
-                                                             tts_result & result) {
+bool Qwen3TTS::prepare_icl_prompt(const std::string & reference_audio,
+                                  const std::string & reference_text,
+                                  const tts_params & params,
+                                  icl_prompt & out) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    const int32_t call_n_threads = effective_n_threads(params);
+    apply_n_threads(call_n_threads);
+
+    if (!models_loaded_) {
+        error_msg_ = "Models not loaded";
+        return false;
+    }
+
+    std::string resident_error;
+    if (!ensure_runtime_resident_locked(0u, resident_error)) {
+        error_msg_ = resident_error;
+        return false;
+    }
+    guarded_operation operation_guard(*this, true);
+
+    std::vector<float> ref_samples;
+    int ref_sample_rate;
+    if (!load_audio_file(reference_audio, ref_samples, ref_sample_rate)) {
+        error_msg_ = "Failed to load reference audio: " + reference_audio;
+        return false;
+    }
+
+    const int target_rate = 24000;
+    if (ref_sample_rate != target_rate) {
+        fprintf(stderr, "Resampling audio from %d Hz to %d Hz...\n", ref_sample_rate, target_rate);
+        std::vector<float> resampled;
+        resample_linear(ref_samples.data(), (int)ref_samples.size(), ref_sample_rate, resampled, target_rate);
+        ref_samples = std::move(resampled);
+    }
+
+    return prepare_icl_prompt_from_samples(ref_samples.data(), (int32_t)ref_samples.size(),
+                                           reference_text, params, out);
+}
+
+bool Qwen3TTS::prepare_icl_prompt_from_samples(const float * ref_samples,
+                                               int32_t n_ref_samples,
+                                               const std::string & reference_text,
+                                               const tts_params & params,
+                                               icl_prompt & out) {
+    const int32_t call_n_threads = effective_n_threads(params);
+    apply_n_threads(call_n_threads);
+
+    if (!models_loaded_) {
+        error_msg_ = "Models not loaded";
+        return false;
+    }
+
+    if (!ref_samples || n_ref_samples <= 0) {
+        error_msg_ = "Invalid reference audio samples";
+        return false;
+    }
+
     if (!encoder_loaded_) {
         if (tts_model_path_.empty()) {
-            result.error_msg = "Internal error: missing TTS model path for lazy encoder load";
-            return result;
+            error_msg_ = "Internal error: missing TTS model path for lazy encoder load";
+            return false;
         }
         int64_t t_encoder_load_start = get_time_ms();
         if (!audio_encoder_.load_model(tts_model_path_)) {
-            result.error_msg = "Failed to load speaker encoder: " + audio_encoder_.get_error();
-            return result;
+            error_msg_ = "Failed to load speaker encoder: " + audio_encoder_.get_error();
+            return false;
         }
         encoder_loaded_ = true;
+        audio_encoder_.set_n_threads(call_n_threads);
         if (params.print_timing) {
             fprintf(stderr, "  Speaker encoder lazy-loaded in %lld ms\n",
                     (long long)(get_time_ms() - t_encoder_load_start));
             log_memory_usage("voice/after-encoder-load");
         }
     }
-    
-    int64_t t_encode_start = get_time_ms();
-    std::vector<float> speaker_embedding;
 
-    if (!audio_encoder_.encode(ref_samples, n_ref_samples, speaker_embedding)) {
-        result.error_msg = "Failed to extract speaker embedding: " + audio_encoder_.get_error();
-        return result;
+    icl_prompt prepared;
+    prepared.ref_text = reference_text;
+    prepared.expected_hidden_size = transformer_.get_config().hidden_size;
+    prepared.expected_n_codebooks = transformer_.get_config().n_codebooks;
+    if (!audio_encoder_.encode(ref_samples, n_ref_samples, prepared.speaker_embedding)) {
+        error_msg_ = "Failed to extract speaker embedding: " + audio_encoder_.get_error();
+        return false;
     }
-    result.t_encode_ms = get_time_ms() - t_encode_start;
 
     if (params.print_progress) {
-        fprintf(stderr, "Speaker embedding extracted: %zu floats\n", speaker_embedding.size());
+        fprintf(stderr, "Speaker embedding extracted: %zu floats\n", prepared.speaker_embedding.size());
     }
 
     // ICL mode: also encode reference audio to discrete codec codes and thread
     // them + the reference transcript into the talker prefill.
-    if (!params.ref_text.empty()) {
+    if (!reference_text.empty()) {
         if (!codec_encoder_loaded_) {
             if (decoder_model_path_.empty()) {
-                result.error_msg = "Internal error: missing tokenizer model path for codec encoder";
-                return result;
+                error_msg_ = "Internal error: missing tokenizer model path for codec encoder";
+                return false;
             }
             int64_t t_ce_start = get_time_ms();
             if (!codec_encoder_.load_model(decoder_model_path_)) {
-                result.error_msg = "Failed to load Mimi codec encoder: " + codec_encoder_.get_error();
-                return result;
+                error_msg_ = "Failed to load Mimi codec encoder: " + codec_encoder_.get_error();
+                return false;
             }
             codec_encoder_loaded_ = true;
+            codec_encoder_.set_n_threads(call_n_threads);
             if (params.print_timing) {
                 fprintf(stderr, "  Codec encoder lazy-loaded in %lld ms\n",
                         (long long)(get_time_ms() - t_ce_start));
             }
         }
 
-        std::vector<int32_t> ref_codes;
-        int32_t n_ref_frames = 0;
-        int64_t t_ce_encode_start = get_time_ms();
-        if (!codec_encoder_.encode(ref_samples, n_ref_samples, ref_codes, n_ref_frames)) {
-            result.error_msg = "Failed to encode reference audio: " + codec_encoder_.get_error();
-            return result;
+        if (!codec_encoder_.encode(ref_samples, n_ref_samples,
+                                   prepared.ref_codes, prepared.n_ref_frames)) {
+            error_msg_ = "Failed to encode reference audio: " + codec_encoder_.get_error();
+            return false;
         }
-        result.t_encode_ms += get_time_ms() - t_ce_encode_start;
 
         if (params.print_progress) {
-            fprintf(stderr, "Reference codes: %d frames x 16 codebooks (ICL mode)\n", n_ref_frames);
+            fprintf(stderr, "Reference codes: %d frames x 16 codebooks (ICL mode)\n",
+                    prepared.n_ref_frames);
         }
-        return synthesize_internal_unlocked(text, speaker_embedding.data(), params, result,
-                                            ref_codes.data(), n_ref_frames);
     }
 
-    return synthesize_internal_unlocked(text, speaker_embedding.data(), params, result);
+    out = std::move(prepared);
+    return true;
+}
+
+tts_result Qwen3TTS::synthesize_with_voice_samples_unlocked(const std::string & text,
+                                                             const float * ref_samples,
+                                                             int32_t n_ref_samples,
+                                                             const tts_params & params,
+                                                             tts_result & result) {
+    icl_prompt prompt;
+    const int64_t t_encode_start = get_time_ms();
+    if (!prepare_icl_prompt_from_samples(ref_samples, n_ref_samples, params.ref_text, params, prompt)) {
+        result.error_msg = error_msg_;
+        return result;
+    }
+    result.t_encode_ms = get_time_ms() - t_encode_start;
+    return synthesize_with_icl_prompt_unlocked(text, prompt, params, result);
+}
+
+tts_result Qwen3TTS::synthesize_with_icl_prompt(const std::string & text,
+                                                const icl_prompt & prompt,
+                                                const tts_params & params) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    const int32_t call_n_threads = effective_n_threads(params);
+    apply_n_threads(call_n_threads);
+    tts_result result;
+
+    std::string prompt_error;
+    if (!validate_icl_prompt_unlocked(prompt, prompt_error)) {
+        result.error_msg = prompt_error;
+        return result;
+    }
+
+    if (!models_loaded_) {
+        result.error_msg = "Models not loaded";
+        return result;
+    }
+
+    const uint32_t required = static_cast<uint32_t>(residency_component::transformer) |
+        static_cast<uint32_t>(residency_component::decoder);
+    std::string resident_error;
+    if (!ensure_runtime_resident_locked(required, resident_error)) {
+        result.error_msg = resident_error;
+        return result;
+    }
+    guarded_operation operation_guard(*this, true);
+
+    return synthesize_with_icl_prompt_unlocked(text, prompt, params, result);
+}
+
+tts_result Qwen3TTS::synthesize_with_icl_prompt_unlocked(const std::string & text,
+                                                         const icl_prompt & prompt,
+                                                         const tts_params & params,
+                                                         tts_result & result) {
+    std::string prompt_error;
+    if (!validate_icl_prompt_unlocked(prompt, prompt_error)) {
+        result.error_msg = prompt_error;
+        return result;
+    }
+
+    tts_params prompt_params = params;
+    prompt_params.ref_text = prompt.ref_text;
+    const bool has_ref_codes = !prompt.ref_text.empty() &&
+                               prompt.n_ref_frames > 0 &&
+                               !prompt.ref_codes.empty();
+
+    return synthesize_internal_unlocked(text,
+                                        prompt.speaker_embedding.data(),
+                                        prompt_params,
+                                        result,
+                                        has_ref_codes ? prompt.ref_codes.data() : nullptr,
+                                        has_ref_codes ? prompt.n_ref_frames : 0);
+}
+
+bool Qwen3TTS::validate_icl_prompt_unlocked(const icl_prompt & prompt, std::string & error) const {
+    if (prompt.speaker_embedding.empty()) {
+        error = "Invalid prepared ICL prompt: missing speaker embedding";
+        return false;
+    }
+
+    const int32_t hidden_size = transformer_.get_config().hidden_size;
+    if (prompt.expected_hidden_size > 0 && prompt.expected_hidden_size != hidden_size) {
+        error = "Invalid prepared ICL prompt: hidden_size mismatch: expected " +
+                std::to_string(hidden_size) + " but prompt was prepared for " +
+                std::to_string(prompt.expected_hidden_size);
+        return false;
+    }
+    if ((int32_t) prompt.speaker_embedding.size() != hidden_size) {
+        error = "Invalid prepared ICL prompt: speaker embedding size mismatch: expected " +
+                std::to_string(hidden_size) + " but got " +
+                std::to_string(prompt.speaker_embedding.size());
+        return false;
+    }
+
+    const int32_t n_codebooks = transformer_.get_config().n_codebooks;
+    if (prompt.expected_n_codebooks > 0 && prompt.expected_n_codebooks != n_codebooks) {
+        error = "Invalid prepared ICL prompt: n_codebooks mismatch: expected " +
+                std::to_string(n_codebooks) + " but prompt was prepared for " +
+                std::to_string(prompt.expected_n_codebooks);
+        return false;
+    }
+
+    const bool has_ref_codes = !prompt.ref_text.empty() &&
+                               prompt.n_ref_frames > 0 &&
+                               !prompt.ref_codes.empty();
+    if (has_ref_codes) {
+        const size_t expected_codes = (size_t) prompt.n_ref_frames * (size_t) n_codebooks;
+        if (prompt.ref_codes.size() != expected_codes) {
+            error = "Invalid prepared ICL prompt: reference code count mismatch: expected " +
+                    std::to_string(expected_codes) + " but got " +
+                    std::to_string(prompt.ref_codes.size());
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool Qwen3TTS::extract_speaker_embedding(const float * ref_samples, int32_t n_ref_samples,
                                           std::vector<float> & embedding,
                                           const tts_params & params) {
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    const int32_t call_n_threads = effective_n_threads(params);
+    apply_n_threads(call_n_threads);
+
     if (!models_loaded_) {
         error_msg_ = "Models not loaded";
         return false;
@@ -705,6 +906,9 @@ bool Qwen3TTS::extract_speaker_embedding_unlocked(const float * ref_samples,
                                                   int32_t n_ref_samples,
                                                   std::vector<float> & embedding,
                                                   const tts_params & params) {
+    const int32_t call_n_threads = effective_n_threads(params);
+    apply_n_threads(call_n_threads);
+
     if (!encoder_loaded_) {
         if (tts_model_path_.empty()) {
             error_msg_ = "Internal error: missing TTS model path for lazy encoder load";
@@ -716,6 +920,7 @@ bool Qwen3TTS::extract_speaker_embedding_unlocked(const float * ref_samples,
             return false;
         }
         encoder_loaded_ = true;
+        audio_encoder_.set_n_threads(call_n_threads);
         if (params.print_timing) {
             fprintf(stderr, "  Speaker encoder lazy-loaded in %lld ms\n",
                     (long long)(get_time_ms() - t_encoder_load_start));
@@ -772,6 +977,9 @@ tts_result Qwen3TTS::synthesize_internal_unlocked(const std::string & text,
                                                    tts_result & result,
                                                    const int32_t * ref_codes,
                                                    int32_t n_ref_frames) {
+    const int32_t call_n_threads = effective_n_threads(params);
+    apply_n_threads(call_n_threads);
+
     int64_t t_total_start = get_time_ms();
     auto sample_memory = [&](const char * stage) {
         process_memory_snapshot mem;
@@ -834,6 +1042,7 @@ tts_result Qwen3TTS::synthesize_internal_unlocked(const std::string & text,
             return result;
         }
         transformer_loaded_ = true;
+        transformer_.set_n_threads(call_n_threads);
         if (params.print_timing) {
             fprintf(stderr, "  Transformer reloaded in %lld ms\n",
                     (long long)(get_time_ms() - t_reload_start));
@@ -863,11 +1072,18 @@ tts_result Qwen3TTS::synthesize_internal_unlocked(const std::string & text,
                                ref_text_tokens.empty() ? nullptr : ref_text_tokens.data(),
                                (int32_t)ref_text_tokens.size(),
                                icl_mode ? ref_codes : nullptr,
-                               icl_mode ? n_ref_frames : 0)) {
+                               icl_mode ? n_ref_frames : 0,
+                               params.print_timing)) {
         result.error_msg = "Failed to generate speech codes: " + transformer_.get_error();
         return result;
     }
     result.t_generate_ms = get_time_ms() - t_generate_start;
+#ifdef QWEN3_TTS_TIMING
+    if (const tts_timing * timing = transformer_.last_timing()) {
+        result.detailed_timing = *timing;
+        result.has_detailed_timing = true;
+    }
+#endif
     sample_memory("synth/after-generate");
     
     int n_codebooks = transformer_.get_config().n_codebooks;
@@ -901,6 +1117,7 @@ tts_result Qwen3TTS::synthesize_internal_unlocked(const std::string & text,
             return result;
         }
         decoder_loaded_ = true;
+        audio_decoder_.set_n_threads(call_n_threads);
         if (params.print_timing) {
             fprintf(stderr, "  Vocoder lazy-loaded in %lld ms\n",
                     (long long)(get_time_ms() - t_decoder_load_start));
